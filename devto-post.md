@@ -8,7 +8,7 @@ Software projects are supposed to begin with a sensible problem. Mine began with
 noticing a dropdown.
 
 Microsoft 365 Copilot, old design, top right: a model picker. It said **GPT 5.6
-Think**. I clicked it, got a visibly better answer than usual, and thought the
+Think**. I clicked it, got a visibly better answers than usual, and thought the
 thought that ruins weekends: *can I get at that from code?*
 
 Microsoft's official Copilot Chat API says no. It accepts `message`,
@@ -20,7 +20,7 @@ Also, I cannot use that API. It requires a Microsoft 365 Copilot **add-on
 licence**, and the docs are blunt about it: *"Support for users without a
 Microsoft 365 Copilot add-on license isn't currently available."* My tenant is on
 the included tier — the wire calls it `licenseType=Starter`, which is a
-wonderfully corporate way to say *no*.
+wonderfully corporate way to say *show* *us* *the* *money*.
 
 So the situation was: the capability exists, it is sitting behind a button, the
 button works, and the officially blessed path to it is both closed to me and
@@ -33,7 +33,7 @@ This is, objectively, a silly reason to spend a Saturday. And yet.
 On 7 July 2026 Microsoft started replacing named models in that picker with
 generic modes — Auto, Quick response, Think deeper. My screenshot from 4 August
 still showed "GPT 5.6 Think", because rollouts are uneven and I happened to be
-standing in the slow lane.
+standing in the slow lane (well... atleast my BRAIN is)
 
 Which reframes the project. This is not "build a useful tool." This is
 archaeology on a button that is being removed while you photograph it. If I
@@ -49,6 +49,7 @@ the chat invocation, a sibling of the message rather than a property of it.
 `tone` is inherited from Bing Chat. In Bing, `tone` was Creative / Balanced /
 Precise — the little personality slider. Microsoft kept the field and repurposed
 it to carry which large language model answers you and how hard it thinks.
+Are they lazy or incompetent? Nobobody knows! Hahaha - Everybody knows, *wink* *wink* *nudge* *nudge*
 
 Two runs. Same prompt. Same everything. Picker moved from Auto to GPT 5.6 Think
 deeper:
@@ -62,7 +63,7 @@ One field. The other four hundred-odd lines of that payload — thirty-four
 `optionsSets` feature flags, thirty-one `allowedMessageTypes` — byte-identical.
 
 The default is `Magic`. Not `Auto`, not `Default`, not `Balanced`. `Magic`. Det
-står faktisk `Magic`.
+står faktisk `Magic`. (Yes, I sometimes let my native language pour out when I am shocked)
 
 Here is the complete menu, lifted from the client's own preferences payload
 rather than guessed from traffic:
@@ -250,3 +251,8 @@ afternoon in August discovering this.
 
 Code: [github.com/aweussom/i-want-my-model-picker-back](https://github.com/aweussom/i-want-my-model-picker-back).
 Works today. Makes no promises about tomorrow, on account of the button.
+
+The [README](https://github.com/aweussom/i-want-my-model-picker-back#readme) has
+the dry version: the full frame format, the upload path, a flow diagram of how it
+works, and a second diagram of every wrong turn above — which is, in fairness, the
+more honest picture of the two.
