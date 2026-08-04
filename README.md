@@ -1,17 +1,30 @@
-# copilot-wire
+# i want my model picker back
 
-Microsoft 365 Copilot's GUI has a model picker. Microsoft's official Copilot
-Chat API has no model parameter.
+Microsoft 365 Copilot's GUI has a model picker. Microsoft's official Copilot Chat
+API has no model parameter. Microsoft is also deleting the picker.
 
-That gap is why this repo exists. As of August 2026 you can open
-`m365.cloud.microsoft/chat`, turn *off* the new design, and pick **GPT 5.6 Think
-deeper** from a dropdown. There is no supported way to request that model
-programmatically — the official `chatOverStream` endpoint accepts `message`,
-`locationHint`, `additionalContext` and `contextualResources`, and nothing that
-names a model. Microsoft also began removing named models from the picker on
-7 July 2026, so the dropdown is on its way out.
+So this is an OpenAI-compatible endpoint for M365 Copilot in which `model`
+actually does something, built by working out what the web client sends when you
+touch that dropdown. As of August 2026 you can open `m365.cloud.microsoft/chat`,
+turn *off* the new design, and choose **GPT 5.6 Think deeper**. The official
+`chatOverStream` endpoint accepts `message`, `locationHint`, `additionalContext`
+and `contextualResources` — nothing that names a model — and requires a Copilot
+add-on licence this tenant does not have (`licenseType=Starter` on the wire).
 
-So: wire-protocol archaeology on a button that is being deleted.
+Named models started disappearing from the picker on 7 July 2026, so: wire-format
+archaeology on a button being removed while you photograph it.
+
+### What this does not fix
+
+Nothing here removes the business harness. The chat payload carries 34
+`optionsSets` flags and 31 permitted message types, and GPT 5.6 arrives at your
+question already wearing enterprise search grounding, a sanitiser, citation
+rewriting, a plugin dispatcher, and a flag called
+`cdxgrounding_api_v2_rich_web_answers_reference_bottom_force`. All of that stays.
+
+The only thing this changes is **which** model gets thrown overboard wearing it.
+That is one string in one field, and it is the difference between a shrug and an
+answer.
 
 ## The finding
 
