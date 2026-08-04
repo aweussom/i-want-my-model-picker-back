@@ -1,0 +1,14 @@
+# The browser profile holds LIVE SESSION COOKIES for whichever Microsoft
+# account you signed into. Committing it is equivalent to publishing your
+# credentials. Never track it.
+.profile/
+
+# Captures are raw wire logs. capture.py redacts bearer tokens, but frames also
+# contain prompt and response text, file names, and chat titles from your
+# account. Review by hand and copy the interesting bits out rather than
+# committing the whole log.
+captures/
+
+.venv/
+__pycache__/
+*.pyc
