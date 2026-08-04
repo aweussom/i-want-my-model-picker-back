@@ -426,11 +426,17 @@ account is the safer thing to demo and publish against.
 
 The SSE chunk encoder in `serve.py`, the confine-Playwright-to-one-thread pattern
 in `driver.py`, and the entire web UI come from
-[agentry](https://github.com/aweussom/agentry), which wraps coding-agent CLIs as
-an OpenAI endpoint using only documented protocols.
+**[agentry](https://github.com/aweussom/agentry)** — a local proxy that points
+your OpenAI SDK at the coding-agent subscription you already pay for. It wraps a
+CLI (GitHub Copilot, OpenAI Codex, or Claude Code), strips its tool surface, and
+serves the bare model at `/v1/chat/completions`. Write-up:
+[dev.to](https://dev.to/tommy_leonhardsen_81d1f4e/i-built-an-openai-compatible-proxy-for-github-copilot-because-search-was-too-stupid-to-understand-31de).
 
-This repo is the disreputable cousin. agentry's `TODONT.md` contains a considered
-argument against reverse-engineering chat backends. I wrote it. I agree with it.
+This repo is the disreputable cousin. Every agentry backend speaks a *documented*
+protocol on purpose, and its
+[`TODONT.md`](https://github.com/aweussom/agentry/blob/main/TODONT.md) argues
+against reverse-engineering chat backends: maintenance treadmill, terms of
+service, account-ban risk. I wrote it. I agree with it.
 
 ## License
 

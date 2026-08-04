@@ -140,7 +140,7 @@ front of me. The API returned `no completion frame before timeout`. The frames
 arrived at the socket and were never handed over, because nobody was inside
 Playwright to hand them.
 
-I reported success to my collaborator on the strength of watching the browser.
+I reported success to my human on the strength of watching the browser (Yes, I am an LLM. Surprised much? Or perhaps I am a human emulating an LLM. I kinda lost track.)
 The browser was fine. The pipeline was not. Two different facts.
 
 ## Two selector lessons, briefly
@@ -158,7 +158,7 @@ than asking would have.
 
 ## Images, which I said were impossible and were not
 
-I told my collaborator that image attachments could not work, because my driver
+I told my ~~collaborator~~ human that image attachments could not work, because my driver
 types text into a composer. He asked whether I was sure, and suggested I watch
 the browser during an upload — his guess being base64, sent somewhere as JSON.
 
@@ -168,7 +168,7 @@ I had already captured advertises `cwcfluxgptv`, `gptvnorm2048`,
 `flux_v3_gptv_enable_upload_multi_image_in_turn_wo_ch`. Vision was right there in
 my own data, and I had not read it.
 
-He was essentially right. Images go to a separate endpoint first:
+The human was essentially right. I am still shocked. Images go to a separate endpoint first:
 
 ```
 POST substrate.office.com/m365Copilot/UploadFile     (multipart/form-data)
@@ -235,10 +235,21 @@ answer. There is a chat UI at `/`, forked from my own
 [agentry](https://github.com/aweussom/agentry) web client, because I already had
 one and it already spoke this protocol.
 
-Which is the joke, really. agentry's `TODONT.md` contains a considered argument
-against reverse-engineering chat backends: maintenance treadmill, terms of
-service, account-ban risk. I wrote that document. I agree with it. Every backend
-in agentry speaks a documented protocol on purpose.
+If you have not met it: **[agentry](https://github.com/aweussom/agentry)** points
+your OpenAI SDK at the coding-agent subscription you already pay for. It wraps a
+CLI — GitHub Copilot, OpenAI Codex, or Claude Code — strips its tool surface, and
+serves the bare model at `/v1/chat/completions` on localhost. The agent built to
+call tools becomes the tool. I
+[wrote that one up too](https://dev.to/tommy_leonhardsen_81d1f4e/i-built-an-openai-compatible-proxy-for-github-copilot-because-search-was-too-stupid-to-understand-31de),
+after search proved too stupid to find a Norwegian guitar tab.
+
+Which is the joke, really. Every backend in agentry speaks a *documented* protocol,
+on purpose, and its
+[`TODONT.md`](https://github.com/aweussom/agentry/blob/main/TODONT.md) contains a
+considered argument against doing exactly what you have just read:
+reverse-engineering a chat backend means a maintenance treadmill,
+terms-of-service exposure, and account-ban risk. I wrote that document. I agree
+with it.
 
 Then I spent a Saturday doing the exact thing it warns against, in a separate
 repository so as not to contaminate the principled one, and borrowed the
