@@ -27,10 +27,26 @@
     let body = null;
     try {
       const req = args[0];
-      if (typeof req === "string") { url = req; } else if (req && req.url) { url = req.url; }
       const init = args[1] || {};
+      // args[0] may be a string, a URL, or a Request. Relative URLs must be
+      // resolved or the record is useless for identifying an endpoint.
+      if (typeof req === "string") {
+        url = req;
+      } else if (req instanceof URL) {
+        url = req.href;
+      } else if (req && typeof req.url === "string") {
+        url = req.url;
+      }
+      try { url = new URL(url, location.href).href; } catch (_) {}
+
       method = (init.method || (req && req.method) || "GET").toUpperCase();
-      if (init.body && typeof init.body === "string") body = init.body;
+
+      if (typeof init.body === "string") {
+        body = init.body;
+      } else if (req && typeof req.clone === "function" && method !== "GET") {
+        // A Request carries its body on the object, not in init.
+        try { body = await req.clone().text(); } catch (_) {}
+      }
     } catch (_) {}
 
     const boring = BORING.test(url);

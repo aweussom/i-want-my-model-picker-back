@@ -294,14 +294,21 @@ def main() -> int:
     parser.add_argument("--label", required=True)
     parser.add_argument("--url", default=CHAT_URL)
     parser.add_argument("--seconds", type=int, default=900)
+    parser.add_argument(
+        "--profile",
+        default=str(PROFILE_DIR),
+        help="browser profile dir; use a throwaway one for self-tests so it "
+        "cannot collide with a live signed-in session (Chromium locks it)",
+    )
     args = parser.parse_args()
 
+    profile_dir = Path(args.profile)
     CAPTURE_DIR.mkdir(exist_ok=True)
-    PROFILE_DIR.mkdir(exist_ok=True)
+    profile_dir.mkdir(parents=True, exist_ok=True)
     out_path = CAPTURE_DIR / f"{args.label}.jsonl"
     rec = Recorder(out_path)
 
-    print(f"profile : {PROFILE_DIR}")
+    print(f"profile : {profile_dir}")
     print(f"writing : {out_path}")
     print("\nThe browser is yours. Set the model picker, send a prompt.")
     print("Watch for a '*** chat POST' line -- that is the request we want.")
@@ -309,7 +316,7 @@ def main() -> int:
 
     with sync_playwright() as pw:
         context = pw.chromium.launch_persistent_context(
-            user_data_dir=str(PROFILE_DIR),
+            user_data_dir=str(profile_dir),
             headless=False,
             viewport={"width": 1500, "height": 950},
             args=["--disable-blink-features=AutomationControlled"],
