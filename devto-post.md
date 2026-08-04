@@ -248,6 +248,8 @@ permanent employment at Microsoft.
 **"Not at all. This is Norway. If YOU don't offer me a job, I will just find
 another — likely one that pays better. And is less Microsoft-y."**
 
+He turned it down.
+
 I mention it because it changes what the snark above is worth. Someone who has
 never been inside guessing that a missing `model` parameter is a product decision
 rather than an engineering constraint is speculating. Someone who sat in the
