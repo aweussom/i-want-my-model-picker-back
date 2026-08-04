@@ -1,119 +1,177 @@
 # copilot-wire
 
 Microsoft 365 Copilot's GUI has a model picker. Microsoft's official Copilot
-Chat API does not have a model parameter.
+Chat API has no model parameter.
 
-That gap is the whole reason this repo exists. As of August 2026 you can open
-`m365.cloud.microsoft/chat`, turn *off* the new design, and choose **GPT 5.6
-Think** from a dropdown. There is no supported way to ask for that model
-programmatically — and Microsoft started removing named models from the picker
-on 7 July 2026, so the dropdown itself is on the way out.
+That gap is why this repo exists. As of August 2026 you can open
+`m365.cloud.microsoft/chat`, turn *off* the new design, and pick **GPT 5.6 Think
+deeper** from a dropdown. There is no supported way to request that model
+programmatically — the official `chatOverStream` endpoint accepts `message`,
+`locationHint`, `additionalContext` and `contextualResources`, and nothing that
+names a model. Microsoft also began removing named models from the picker on
+7 July 2026, so the dropdown is on its way out.
 
-So this is wire-protocol archaeology on a button that is being deleted. It reads
-the WebSocket frames the Copilot page already receives, works out which field
-carries the model selection, and puts an OpenAI-compatible endpoint in front of
-it.
+So: wire-protocol archaeology on a button that is being deleted.
 
-## Status
+## The finding
 
-| Piece | State |
+Model choice travels in a field called **`tone`**, at the top level of the chat
+invocation, a sibling of `message` rather than a property of it.
+
+`tone` is inherited from Bing Chat, where it held *Creative* / *Balanced* /
+*Precise*. Microsoft repurposed the same field to carry model and reasoning mode.
+The default value is called `Magic`.
+
+Two runs of `run_probe.py` with the same prompt, differing only in the picker:
+
+```
+$ python diff_frames.py captures/send-auto.jsonl captures/send-think.jsonl
+captures\send-auto.jsonl: 1 chat invocation(s)
+captures\send-think.jsonl: 1 chat invocation(s)
+
+=== wire diff (send-auto -> send-think) ===
+  ~ arguments[0].tone: "Magic" -> "Gpt_5_6_Reasoning"
+```
+
+One field. Everything else — 34 `optionsSets` flags, 31 `allowedMessageTypes`,
+the whole `message` object — is byte-identical.
+
+### The full enum
+
+Taken from the client's own `clientPreferences.modelSelectorMetadata`, so this is
+every value the app ships, not just the ones observed in traffic:
+
+| `tone` value | Menu label | Section |
+|---|---|---|
+| `Magic` | Auto — "Decides how long to think" | 1 (default) |
+| `Chat` | Quick response — "Answers right away" | 1 |
+| `Reasoning` | Think deeper — "Think longer for better answers" | 1 |
+| `Gpt_5_6_Reasoning` | GPT 5.6 Think deeper (short: "GPT 5.6 Think") | 2 |
+| `Gpt_5_5_Chat` | GPT 5.5 Quick response | 2 |
+
+Section 1 holds the generic modes that survived the July change; section 2 holds
+the residual named models. Chat history on this tenant still contains
+`Gpt_5_4_Reasoning` threads even though 5.4 is no longer offered in the menu —
+the deprecation is visible in your own account.
+
+`tone` is **per conversation**, not per profile. A new chat resets to `Magic`
+regardless of what was selected in another thread, so the picker has to be set
+before the first send.
+
+## The transport
+
+```
+wss://substrate.office.com/m365Copilot/Chathub/{userObjectId}@{tenantId}
+    ?chatsessionid=…&XRoutingParameterSessionKey=…&clientrequestid=…
+    &X-SessionId=…&ConversationId=…
+```
+
+SignalR over WebSocket. The client sends a `type: 4` invocation to
+`target: "chat"`; the server streams the reply back and closes the invocation.
+
+```json
+{"type": 4, "target": "chat", "invocationId": "0", "arguments": [{
+  "tone": "Gpt_5_6_Reasoning",
+  "source": "officeweb",
+  "streamingMode": "ConciseWithPadding",
+  "isStartOfSession": false,
+  "message": {
+    "author": "user", "inputMethod": "Keyboard", "messageType": "Chat",
+    "text": "Reply with exactly the word OK and nothing else.",
+    "locale": "no", "locationInfo": {"timeZone": "Europe/Oslo"}
+  },
+  "optionsSets": ["cwc_flux_v3", "flux_v3_references", "…31 more"],
+  "allowedMessageTypes": ["Chat", "Suggestion", "Progress", "…28 more"]
+}]}
+```
+
+**A correction.** An earlier version of this README claimed the public writeups
+describing a substrate SignalR Chathub were documenting a surface that no longer
+exists. That was wrong, and the mistake is instructive: the Chathub socket opens
+**lazily, on the first message send**. Captures that only loaded the page saw
+nothing but a Trouter socket (`go-eu.trouter.teams.microsoft.com`, socket.io
+framing, `ua=BizChat`) carrying auth and presence signalling with no chat
+content — so "no Chathub" was an artifact of never having sent a prompt. The
+published descriptions are substantially correct. `tone` is the part they miss.
+
+## Tools
+
+| Script | Job |
 |---|---|
-| `capture.py` — passive frame recorder | works, self-tested end to end |
-| `diff_frames.py` — find the model-selection field | works, validated on synthetic captures |
-| `driver.py` — resident browser, frames to text | written, **frame shapes not yet confirmed against a live tenant** |
-| `serve.py` — OpenAI-compatible endpoint | written, untested against a live tenant |
+| `capture.py` | Passive recorder. You drive; it records WebSocket frames, POST bodies, and streamed responses. |
+| `tap.js` | Injected before page scripts; wraps `fetch`/`EventSource`/`XMLHttpRequest`. |
+| `run_probe.py` | Automated: selects a model, sends a prompt, captures the whole turn. |
+| `diff_frames.py` | Diffs two captures' chat invocations, filtering GUID noise. |
+| `inspect_capture.py` | Summarises a capture: endpoints, streams, model-selector candidates. |
+| `probe_dom.py` | Dumps the page's real inputs and buttons, so selectors are based on fact. |
+| `find_tones.py` | Scrapes the tone enum from the app's own JavaScript bundles. |
+| `serve.py` / `driver.py` | OpenAI-compatible endpoint over a resident browser. |
 
-`extract_deltas()` in `driver.py` is built from publicly documented BizChat
-frame shapes, not from a capture of a real session. Run the capture first; if
-the shapes differ, that one function is the only thing that needs changing.
-
-## Why read the WebSocket instead of the DOM
-
-Scraping rendered HTML can tell you that text stopped growing. It cannot tell
-you the turn is *finished* — those are different facts, and confusing them is
-where DOM-driven chat wrappers get flaky. The wire carries an explicit
-completion record, so `driver.py` uses Playwright for the things a browser is
-genuinely good at (real SSO, MFA, device compliance, a persistent profile,
-clicking the model picker like a human) and reads the frames for everything else.
-
-## Setup
+### Reproducing the finding
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install playwright flask
 .\.venv\Scripts\python.exe -m playwright install chromium
+
+# Sign in once; the profile persists.
+.\.venv\Scripts\python.exe capture.py --label signin --seconds 300
+
+.\.venv\Scripts\python.exe run_probe.py --label send-auto  --tone "Auto" --prompt "Reply with exactly the word OK and nothing else."
+.\.venv\Scripts\python.exe run_probe.py --label send-think --tone "GPT 5.6 Think deeper" --prompt "Reply with exactly the word OK and nothing else."
+.\.venv\Scripts\python.exe diff_frames.py captures\send-auto.jsonl captures\send-think.jsonl
 ```
 
-## 1. Capture the wire
+## Things learned the hard way
 
-Two runs, changing only the model picker between them:
+Three bugs, all found by checking output against reality rather than trusting it.
+A silent observer failure looks exactly like "the system doesn't do that."
 
-```powershell
-.\.venv\Scripts\python.exe capture.py --label auto
-.\.venv\Scripts\python.exe capture.py --label gpt56think
-```
+**Redact at the write boundary.** The first recorder scrubbed credentials only on
+successfully-parsed JSON. Trouter's socket.io frames (`5:::{…}`) failed
+`json.loads`, fell through to a raw branch, and wrote a live
+`Authorization: Bearer eyJ…` to disk. Redaction now runs on every line
+immediately before it is written, so no parse path can bypass it.
 
-A real Chromium opens. Sign in on the first run — the profile persists, so later
-runs are already authenticated. Nothing is automated here on purpose: you pick
-the model, you type the prompt, you press send. Every frame is echoed live and
-written to `captures/<label>.jsonl`.
+**`fetch()` takes three argument shapes.** A string, a `URL`, or a `Request`. The
+tap only handled strings, so every record had an empty `url` and the send
+endpoint was unidentifiable. Bodies on a `Request` live on the object, not in
+`init.body`, and need `request.clone().text()`.
 
-## 2. Find the field
+**CDP's `Network.eventSourceMessageReceived` only fires for real `EventSource`.**
+An app streaming `text/event-stream` through `fetch` + `ReadableStream` is
+invisible to it. Wrapping `fetch` in-page is the only reliable way to see those
+chunks. Read `response.clone()` so the app's own stream is untouched.
 
-```powershell
-.\.venv\Scripts\python.exe diff_frames.py captures\auto.jsonl captures\gpt56think.jsonl
-```
-
-GUIDs, timestamps and the prompt text are filtered as noise, so what remains is
-the actual difference:
-
-```
-=== wire diff (auto -> gpt56think) ===
-  + arguments[0].optionsSets gained ["modelselection_gpt56think"]
-```
-
-If it prints `(identical after noise filtering)`, the selection is server-side
-state rather than a per-message field — which is also a result, and it means the
-browser has to stay resident.
-
-## 3. Serve it
-
-```powershell
-.\.venv\Scripts\python.exe serve.py --port 8790
-```
-
-```bash
-curl http://127.0.0.1:8790/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"m365-copilot","stream":true,
-       "messages":[{"role":"user","content":"Explain SignalR record separators"}]}'
-```
-
-One browser means one conversation at a time; turns serialise behind a lock.
+And two selector lessons: the composer is a `<span>` with `role="textbox"`, not a
+`div` or `textarea`, so tag-qualified selectors miss it. The named models sit
+behind a submenu that opens on **hover** — clicking the parent collapses it.
+`probe_dom.py` exists because guessing cost more time than asking.
 
 ## Security
 
-`.gitignore` excludes two directories, and both exclusions matter:
+`.gitignore` excludes `.profile/` and `captures/`, and both matter.
 
 - **`.profile/`** holds live session cookies for whichever Microsoft account you
   signed into. Committing it is equivalent to publishing your credentials.
-- **`captures/`** holds raw wire logs. Bearer tokens and JWTs are redacted
-  automatically, but frames still contain your prompts, the replies, file names
-  and chat titles. Read a capture before you paste any of it in public.
+- **`captures/`** holds raw traffic. Bearer tokens and JWTs are redacted
+  automatically, but frames still contain your prompts, the replies, your chat
+  titles, your tenant ID and your user object ID. Read a capture before you paste
+  any of it in public.
 
-If you are signed into a **work or school** account, everything here runs against
-your employer's tenant under your own identity, with tenant audit logging and
-whatever your acceptable-use policy says about non-browser clients. A personal
-Microsoft account is the safer thing to demo and publish against.
+Signed into a **work or school** account, everything here runs against your
+employer's tenant under your own identity, with tenant audit logging and whatever
+your acceptable-use policy says about non-browser clients. A personal Microsoft
+account is the safer thing to demo and publish against.
 
 ## Credit
 
 The SSE chunk encoder in `serve.py` and the confine-Playwright-to-one-thread
-pattern in `driver.py` both come from [agentry](https://github.com/aweussom/agentry),
+pattern in `driver.py` come from [agentry](https://github.com/aweussom/agentry),
 which wraps coding-agent CLIs as an OpenAI endpoint using only documented
 protocols. This repo is the disreputable cousin: agentry's `TODONT.md` explains
-at some length why reverse-engineering a chat backend is a bad idea. It is
-right. That was never the point.
+at length why reverse-engineering a chat backend is a bad idea. It is right. That
+was never the point.
 
 ## License
 

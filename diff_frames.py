@@ -26,6 +26,7 @@ NOISE_KEYS = {
     "conversationId",
     "clientCorrelationId",
     "chatsessionid",
+    "clientSessionId",
     "X-ClientRequestId",
     "X-SessionId",
     "invocationId",
@@ -43,7 +44,10 @@ def load_invocations(path: Path) -> list[dict[str, Any]]:
                 entry = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if entry.get("kind") != "frame" or entry.get("direction") != "sent":
+            # "ws" is the current record kind; "frame" was the original one.
+            if entry.get("kind") not in ("ws", "frame"):
+                continue
+            if entry.get("direction") != "sent":
                 continue
             payload = entry.get("json")
             if not isinstance(payload, dict):
