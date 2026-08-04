@@ -22,9 +22,11 @@ is why switch_tone() reloads the page.
 
 from __future__ import annotations
 
+import base64
 import json
 import queue
 import re
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -88,11 +90,28 @@ PROGRESS_TYPES = {
 }
 
 CITATION_RE = re.compile(r"\[\^(\d+)\^\]")
+DATA_URI_RE = re.compile(r"^data:(?P<mime>[\w.+/-]+);base64,(?P<data>.+)$", re.DOTALL)
+
+EXTENSION_FOR_MIME = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+}
+
+# ImageSanitizerBingAI rejects trivially small files with InvalidRequest, so a
+# caller sending an 8x8 test pixel gets a useful message instead of a silent drop.
+MIN_IMAGE_BYTES = 1024
 
 
 def is_chathub(url: str) -> bool:
     low = url.lower()
     return "chathub" in low or ("substrate" in low and "copilot" in low)
+
+
+def is_upload(url: str) -> bool:
+    return "uploadfile" in url.lower()
 
 
 class CopilotDriver:
@@ -111,6 +130,8 @@ class CopilotDriver:
         self._socket_url: str | None = None
         self._current_tone: str = DEFAULT_TONE
         self._cancel_requested = False
+        self._uploads: queue.Queue = queue.Queue()
+        self._tmpdir = Path(tempfile.mkdtemp(prefix="copilot-wire-"))
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -175,6 +196,31 @@ class CopilotDriver:
                 ws.on("framereceived", self._on_frame)
 
         page.on("websocket", on_websocket)
+
+        def on_response(response) -> None:
+            """Signal when an image upload settles, so sends can wait on fact."""
+            if not is_upload(response.url):
+                return
+            try:
+                payload = response.json()
+            except Exception:
+                self._uploads.put((False, f"HTTP {response.status}, unreadable body"))
+                return
+            result = (payload or {}).get("result") or {}
+            if result.get("value") == "Success":
+                self._uploads.put((True, payload.get("fileName") or "uploaded"))
+            else:
+                # fileSanitizer names which check rejected it; InvalidRequest is
+                # what a too-small image gets.
+                self._uploads.put(
+                    (
+                        False,
+                        f"{result.get('value')}: {result.get('message')} "
+                        f"(sanitizer={payload.get('fileSanitizer')})",
+                    )
+                )
+
+        page.on("response", on_response)
 
     def _find_composer(self, page):
         for selector in COMPOSER_SELECTORS:
@@ -263,6 +309,75 @@ class CopilotDriver:
             pass
         return False
 
+    def _attach_images(self, page, data_uris: list[str]) -> None:
+        """Attach images through Copilot's own file input.
+
+        Deliberately not a hand-rolled POST to /m365Copilot/UploadFile. Handing
+        the file to the page means the app builds the multipart body, supplies
+        the conversationId and the gptv optionsSets, and carries its own auth.
+        The upload is bound to the conversation server-side, which is why the
+        chat frame that follows never references the file.
+        """
+        paths: list[str] = []
+        for uri in data_uris:
+            match = DATA_URI_RE.match(uri.strip())
+            if not match:
+                self._events.put(("progress", "[skipped an attachment: not a base64 data: URI]\n"))
+                continue
+            try:
+                raw = base64.b64decode(match.group("data"), validate=False)
+            except Exception:
+                self._events.put(("progress", "[skipped an attachment: undecodable base64]\n"))
+                continue
+            if len(raw) < MIN_IMAGE_BYTES:
+                self._events.put(
+                    ("progress",
+                     f"[skipped an attachment: {len(raw)} bytes is below the "
+                     f"sanitizer's floor and would be rejected]\n")
+                )
+                continue
+            suffix = EXTENSION_FOR_MIME.get(match.group("mime").lower(), ".png")
+            path = self._tmpdir / f"upload-{int(time.time()*1000)}-{len(paths)}{suffix}"
+            path.write_bytes(raw)
+            paths.append(str(path))
+
+        if not paths:
+            return
+
+        file_input = page.locator('input[type="file"]').first
+        try:
+            if not file_input.count():
+                self._events.put(("progress", "[no file input on the page; attachment dropped]\n"))
+                return
+            while not self._uploads.empty():
+                self._uploads.get_nowait()
+            file_input.set_input_files(paths)
+        except Exception as exc:
+            self._events.put(("progress", f"[attach failed: {exc!r}]\n"))
+            return
+
+        # Wait for one settle signal per file rather than sleeping and hoping.
+        for _ in paths:
+            deadline = time.monotonic() + 90
+            while time.monotonic() < deadline:
+                try:
+                    ok, detail = self._uploads.get_nowait()
+                except queue.Empty:
+                    page.wait_for_timeout(200)   # keeps Playwright events pumping
+                    continue
+                if ok:
+                    print(f"[driver] uploaded {detail}", flush=True)
+                    self._events.put(("progress", f"[attached {detail}]\n"))
+                else:
+                    print(f"[driver] upload rejected: {detail}", flush=True)
+                    self._events.put(("progress", f"[upload rejected: {detail}]\n"))
+                break
+            else:
+                self._events.put(("progress", "[upload did not settle in 90s]\n"))
+
+        # The composer often needs a moment before it accepts typing again.
+        page.wait_for_timeout(1200)
+
     def _run(self) -> None:
         try:
             with sync_playwright() as pw:
@@ -302,7 +417,7 @@ class CopilotDriver:
                         continue
                     if command is None:
                         break
-                    text, tone = command
+                    text, tone, images = command
 
                     # tone is per-conversation, so a change needs a fresh chat.
                     if tone != self._current_tone:
@@ -321,6 +436,9 @@ class CopilotDriver:
                                 ("progress", f"[could not select {tone}; using current]\n")
                             )
                             self._current_tone = DEFAULT_TONE
+
+                    if images:
+                        self._attach_images(page, images)
 
                     composer = self._find_composer(page)
                     if composer is None:
@@ -371,7 +489,8 @@ class CopilotDriver:
         return True
 
     def prompt(self, text: str, tone: str = DEFAULT_TONE,
-               timeout: float = 240.0) -> Iterator[tuple[str, str]]:
+               images: list[str] | None = None,
+               timeout: float = 300.0) -> Iterator[tuple[str, str]]:
         """Send one prompt; yield ("text"|"reasoning", delta) as it arrives.
 
         Copilot re-sends the whole message body as it grows rather than emitting
@@ -387,7 +506,7 @@ class CopilotDriver:
                 except queue.Empty:
                     break
 
-            self._commands.put((text, tone))
+            self._commands.put((text, tone, images or []))
             deadline = time.monotonic() + timeout
             emitted: dict[str, str] = {}
             progress_seen: set[str] = set()

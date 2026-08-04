@@ -131,12 +131,43 @@ the prompt is just a prompt. Verified by generating a 256×256 gradient PNG,
 uploading it, and asking for a description — the reply was "A smooth gradient
 blending blue, green, yellow, orange, pink, and purple colors across the image."
 
-So `driver.py` *could* support images: POST the base64 with the live
-`conversationId`, then send text as usual. It does not do this yet.
+### Sending images through the API
 
-A note on the sanitizer: a 77-byte 8×8 PNG was rejected with
-`{"fileSanitizer": "None", "result": {"value": "InvalidRequest"}}`. Use a
-realistically sized image when testing.
+Implemented. Use the ordinary OpenAI vision shape:
+
+```json
+{"model": "Gpt_5_6_Reasoning", "stream": true,
+ "messages": [{"role": "user", "content": [
+   {"type": "text", "text": "What colours do you see?"},
+   {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBOR…"}}]}]}
+```
+
+Verified against the 256×256 gradient:
+
+```
+REASONING: [attached 912ddeae45.png]  Taking a look…
+CONTENT  : The image is a soft, blurred square gradient blending purple, blue,
+           cyan, green, yellow, orange, pink, and red.
+```
+
+`driver.py` does **not** hand-roll the upload POST. It writes the decoded bytes
+to a temp file and hands them to Copilot's own `input[type=file]`, so the app
+builds the multipart body, supplies the `conversationId` and the gptv
+`optionsSets`, and carries its own auth. Far less to keep in step when Microsoft
+changes the endpoint.
+
+The send then waits on a real signal rather than a sleep: a `page.on("response")`
+listener watches for the `UploadFile` reply and reports `result.value`, so a
+rejection surfaces as text instead of a mysteriously image-free answer.
+
+Two things are refused loudly rather than silently:
+
+- **Remote `http(s)` image URLs** are skipped, not fetched — the proxy makes no
+  outbound requests on a caller's behalf. Same rule agentry applies.
+- **Anything under 1 KB** is skipped before upload. A 77-byte 8×8 PNG comes back
+  `{"fileSanitizer": "None", "result": {"value": "InvalidRequest"}}`, so the
+  floor turns a confusing server error into a clear local message. Test with a
+  realistically sized image.
 
 ## Tools
 

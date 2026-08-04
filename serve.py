@@ -82,14 +82,31 @@ def _resolve_tone(requested: str | None) -> str:
     return DEFAULT_TONE
 
 
-def _has_image(body: dict) -> bool:
-    for message in body.get("messages") or []:
+def _extract_images(body: dict) -> tuple[list[str], int]:
+    """Pull base64 data: URIs off the newest user turn.
+
+    Returns (data_uris, skipped_remote). Remote http(s) image URLs are skipped
+    rather than fetched, so the proxy makes no outbound requests on a caller's
+    behalf -- the same rule agentry applies.
+    """
+    for message in reversed(body.get("messages") or []):
+        if message.get("role") != "user":
+            continue
         content = message.get("content")
-        if isinstance(content, list):
-            for part in content:
-                if isinstance(part, dict) and part.get("type") == "image_url":
-                    return True
-    return False
+        if not isinstance(content, list):
+            return [], 0
+        uris: list[str] = []
+        skipped = 0
+        for part in content:
+            if not isinstance(part, dict) or part.get("type") != "image_url":
+                continue
+            url = (part.get("image_url") or {}).get("url") or ""
+            if url.startswith("data:"):
+                uris.append(url)
+            elif url:
+                skipped += 1
+        return uris, skipped
+    return [], 0
 
 
 def _last_user_message(body: dict) -> str:
@@ -171,14 +188,11 @@ def chat_completions():
     tone = _resolve_tone(body.get("model"))
     stream = bool(body.get("stream"))
 
-    # This driver types text into the composer, so it does not forward
-    # attachments *yet*. The backend itself clearly supports vision: the captured
-    # invocation carries optionsSets including cwcfluxgptv, gptvnorm2048 and
-    # flux_v3_gptv_enable_upload_multi_image_in_turn_wo_ch, plus an empty
-    # message.adaptiveCards array. Finding the upload path is a capture away.
+    images, skipped_remote = _extract_images(body)
     dropped = (
-        "[note: this driver does not forward image attachments yet]\n"
-        if _has_image(body)
+        f"[note: skipped {skipped_remote} remote image URL(s); "
+        f"attach as a base64 data: URI instead]\n"
+        if skipped_remote
         else ""
     )
 
@@ -187,7 +201,7 @@ def chat_completions():
             if dropped:
                 yield _sse(dropped, tone, reasoning=True)
             try:
-                for kind, delta in _driver.prompt(prompt, tone=tone):
+                for kind, delta in _driver.prompt(prompt, tone=tone, images=images):
                     yield _sse(delta, tone, reasoning=(kind == "reasoning"))
             except Exception as exc:
                 yield _sse(f"\n[error: {exc}]", tone)
@@ -200,7 +214,9 @@ def chat_completions():
 
     try:
         text = "".join(
-            delta for kind, delta in _driver.prompt(prompt, tone=tone) if kind == "text"
+            delta
+            for kind, delta in _driver.prompt(prompt, tone=tone, images=images)
+            if kind == "text"
         )
     except Exception as exc:
         return jsonify({"error": {"message": str(exc)}}), 502
