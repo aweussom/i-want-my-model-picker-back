@@ -1,11 +1,21 @@
-"""Passive WebSocket frame recorder for Microsoft 365 Copilot (BizChat).
+"""Passive traffic recorder for Microsoft 365 Copilot (BizChat).
 
 Opens a real Chromium with a persistent profile, lets you drive the Copilot UI
-by hand, and records every WebSocket frame the page sends and receives.
+by hand, and records what the page sends and receives.
 
 Nothing is automated on purpose: you pick the model, you type the prompt, you
 hit send. The point is to learn the wire format without guessing at selectors,
 and in particular to see which field changes when you change the model picker.
+
+What it records, because the chat turns out not to live in one place:
+
+  * WebSocket frames. The m365 chat page opens a Trouter socket
+    (go-eu.trouter.teams.microsoft.com, socket.io framing, `ua=BizChat`) which
+    carries auth and presence signalling but no chat content.
+  * HTTP requests to Copilot-ish hosts, including POST bodies. This is where the
+    prompt actually goes.
+  * Server-sent events, via CDP's Network.eventSourceMessageReceived. Reading
+    SSE this way is non-blocking, unlike awaiting a streaming response body.
 
 Usage:
     python capture.py --label auto
@@ -31,156 +41,271 @@ CHAT_URL = "https://m365.cloud.microsoft/chat"
 PROFILE_DIR = Path(__file__).parent / ".profile"
 CAPTURE_DIR = Path(__file__).parent / "captures"
 
-# SignalR delimits JSON records with an ASCII record separator.
+# SignalR delimits JSON records with an ASCII record separator. Trouter instead
+# uses socket.io framing (`5:1+::{...}`). Both appear on this page.
 RECORD_SEPARATOR = "\x1e"
+SOCKETIO_PREFIX = re.compile(r"^\d+:\d*\+?::?")
 
-# Query-string and header values that must never reach a capture file. These are
-# bearer credentials for a live session; a leaked capture is a leaked account.
 SECRET_PARAMS = ("access_token", "accesstoken", "token", "authorization", "sig")
+
+# Hosts worth recording. Everything else on this page is telemetry noise.
+INTERESTING_HOSTS = (
+    "substrate.office.com",
+    "substrate.svc.cloud.microsoft",
+    "m365.cloud.microsoft",
+    "copilot.microsoft.com",
+    "office.com",
+    "bing.com",
+    "graph.microsoft.com",
+)
+
+SKIP_EXTENSIONS = (
+    ".js", ".css", ".png", ".jpg", ".jpeg", ".svg", ".woff", ".woff2",
+    ".ico", ".gif", ".map", ".webp", ".ttf",
+)
+
+# Telemetry sinks. These POST constantly and their bodies contain the words
+# "message" and "text", which is enough to fool a naive prompt detector.
+TELEMETRY_MARKERS = (
+    "/events",
+    "client_health_ping",
+    "browser.pipe.aria",
+    "events.data.microsoft.com",
+    "/collect",
+    "/telemetry",
+    "/OneCollector",
+    "aria.microsoft.com",
+    "/diagnostics",
+)
+
+# A body has to look like somebody actually typed something.
+PROMPT_HINTS = ('"text"', '"prompt"', '"query"', '"content"')
+
+
+def is_telemetry(url: str) -> bool:
+    low = url.lower()
+    return any(marker.lower() in low for marker in TELEMETRY_MARKERS)
+
+# --- redaction -----------------------------------------------------------
+#
+# Every line is passed through redact_text() immediately before it is written.
+# An earlier version only scrubbed successfully-parsed JSON, so socket.io frames
+# that failed json.loads() fell through to a raw branch and wrote a live
+# `Authorization: Bearer eyJ...` to disk. Scrubbing at the write boundary means
+# no parse path can bypass it.
+
+JWT_RE = re.compile(r"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]+")
+BEARER_RE = re.compile(r"(Bearer\s+)[A-Za-z0-9._\-]{20,}", re.IGNORECASE)
+LONG_B64_RE = re.compile(r"\bey[A-Za-z0-9_\-]{200,}\b")
+SKYPETOKEN_RE = re.compile(
+    r'(?i)("?(?:skypetoken|skype_token|access_token|refresh_token|id_token)"?\s*[:=]\s*"?)'
+    r'[A-Za-z0-9._\-]{20,}'
+)
+
+
+def redact_text(text: str) -> str:
+    """Scrub credentials from arbitrary text. Last line of defence."""
+    text = BEARER_RE.sub(r"\1<REDACTED>", text)
+    text = JWT_RE.sub("<REDACTED-JWT>", text)
+    text = LONG_B64_RE.sub("<REDACTED-TOKEN>", text)
+    text = SKYPETOKEN_RE.sub(r"\1<REDACTED>", text)
+    for param in SECRET_PARAMS:
+        text = re.sub(
+            rf"([?&]{param}=)[^&\"\\\s]*", r"\1<REDACTED>", text, flags=re.IGNORECASE
+        )
+    return text
 
 
 def redact_url(url: str) -> str:
-    """Strip credential-bearing query parameters from a WebSocket URL."""
     for param in SECRET_PARAMS:
         url = re.sub(
-            rf"([?&]{param}=)[^&]*",
-            r"\1<REDACTED>",
-            url,
-            flags=re.IGNORECASE,
+            rf"([?&]{param}=)[^&]*", r"\1<REDACTED>", url, flags=re.IGNORECASE
         )
     return url
 
 
 def redact_payload(obj: Any) -> Any:
-    """Recursively blank out anything that looks like a credential."""
+    """Structural pass, so redacted values stay JSON rather than becoming text."""
     if isinstance(obj, dict):
         out = {}
         for key, value in obj.items():
-            if key.lower() in SECRET_PARAMS or key.lower().endswith("token"):
+            low = key.lower()
+            if low in SECRET_PARAMS or low.endswith("token") or low == "authorization":
                 out[key] = "<REDACTED>"
             else:
                 out[key] = redact_payload(value)
         return out
     if isinstance(obj, list):
         return [redact_payload(item) for item in obj]
-    if isinstance(obj, str) and obj.startswith("ey") and len(obj) > 200:
-        # Bare JWT sitting in a string field.
-        return "<REDACTED-JWT>"
+    if isinstance(obj, str):
+        return redact_text(obj)
     return obj
 
 
 def split_records(payload: str) -> list[str]:
-    """SignalR packs multiple JSON records into one frame, separator-delimited."""
-    return [part for part in payload.split(RECORD_SEPARATOR) if part.strip()]
+    """Unpack a frame into individual records, handling both framings."""
+    parts = [p for p in payload.split(RECORD_SEPARATOR) if p.strip()]
+    out: list[str] = []
+    for part in parts:
+        stripped = SOCKETIO_PREFIX.sub("", part, count=1)
+        out.append(stripped if stripped.strip() else part)
+    return out
 
 
-class FrameRecorder:
-    def __init__(self, path: Path, label: str) -> None:
+def interesting(url: str) -> bool:
+    low = url.lower()
+    if any(low.split("?")[0].endswith(ext) for ext in SKIP_EXTENSIONS):
+        return False
+    return any(host in low for host in INTERESTING_HOSTS)
+
+
+class Recorder:
+    def __init__(self, path: Path) -> None:
         self.path = path
-        self.label = label
         self.handle = path.open("w", encoding="utf-8")
         self.count = 0
-        self.sockets: set[str] = set()
+        self.chat_posts = 0
+        self.stream_chunks = 0
+        self.seen: set[str] = set()
         self.started = time.monotonic()
 
-    def note_socket(self, url: str) -> None:
-        safe = redact_url(url)
-        if safe not in self.sockets:
-            self.sockets.add(safe)
-            print(f"\n[ws] {safe}\n", flush=True)
-            self._write({"kind": "socket-open", "url": safe})
+    def write(self, obj: dict) -> None:
+        self.count += 1
+        obj["seq"] = self.count
+        obj["t"] = round(time.monotonic() - self.started, 3)
+        line = json.dumps(obj, ensure_ascii=False)
+        self.handle.write(redact_text(line) + "\n")
+        self.handle.flush()
 
-    def record(self, direction: str, url: str, payload: str | bytes) -> None:
+    # --- websocket ----------------------------------------------------
+
+    def socket_open(self, url: str) -> None:
+        safe = redact_url(url)
+        if safe in self.seen:
+            return
+        self.seen.add(safe)
+        print(f"\n[ws] {safe[:150]}\n", flush=True)
+        self.write({"kind": "socket-open", "url": safe})
+
+    def ws_frame(self, direction: str, url: str, payload: str | bytes) -> None:
         if isinstance(payload, bytes):
             try:
                 payload = payload.decode("utf-8")
             except UnicodeDecodeError:
-                self._write(
-                    {
-                        "kind": "frame",
-                        "direction": direction,
-                        "url": redact_url(url),
-                        "binary_len": len(payload),
-                    }
-                )
+                self.write({"kind": "ws", "direction": direction, "binary_len": len(payload)})
                 return
-
         for record in split_records(payload):
+            entry: dict[str, Any] = {
+                "kind": "ws",
+                "direction": direction,
+                "url": redact_url(url),
+            }
             try:
-                parsed: Any = json.loads(record)
-                parsed = redact_payload(parsed)
-                entry = {"json": parsed}
-                msg_type = parsed.get("type") if isinstance(parsed, dict) else None
+                parsed = redact_payload(json.loads(record))
+                entry["json"] = parsed
+                entry["type"] = parsed.get("type") if isinstance(parsed, dict) else None
+                name = parsed.get("name") if isinstance(parsed, dict) else None
             except json.JSONDecodeError:
-                entry = {"raw": record[:4000]}
-                msg_type = None
+                entry["raw"] = record[:4000]
+                name = None
+            self.write(entry)
+            arrow = "-->" if direction == "sent" else "<--"
+            tag = name or entry.get("type") or "raw"
+            print(f"{arrow} [ws {tag}]", flush=True)
 
-            self.count += 1
-            self._write(
-                {
-                    "kind": "frame",
-                    "seq": self.count,
-                    "t": round(time.monotonic() - self.started, 3),
-                    "direction": direction,
-                    "type": msg_type,
-                    "url": redact_url(url),
-                    **entry,
-                }
-            )
-            self._echo(direction, msg_type, entry)
+    # --- http ---------------------------------------------------------
 
-    def _echo(self, direction: str, msg_type: Any, entry: dict) -> None:
-        """One terse line per frame so you can watch it happen live."""
-        arrow = "-->" if direction == "sent" else "<--"
-        if "raw" in entry:
-            print(f"{arrow} [raw] {entry['raw'][:90]}", flush=True)
+    def http_request(self, method: str, url: str, post_data: str | None) -> None:
+        entry: dict[str, Any] = {
+            "kind": "http-request",
+            "method": method,
+            "url": redact_url(url),
+        }
+        if post_data:
+            try:
+                entry["body"] = redact_payload(json.loads(post_data))
+            except json.JSONDecodeError:
+                entry["body_raw"] = post_data[:8000]
+            # A POST body carrying prompt text is the chat invocation.
+            if any(hint in post_data for hint in PROMPT_HINTS):
+                self.chat_posts += 1
+                print(
+                    f"\n*** candidate chat POST #{self.chat_posts}: "
+                    f"{url.split('?')[0][:110]}\n",
+                    flush=True,
+                )
+            else:
+                print(f"--> [POST] {url.split('?')[0][:100]}", flush=True)
+        self.write(entry)
+        if not post_data:
+            print(f"--> [http {method}] {url.split('?')[0][:100]}", flush=True)
+
+    def tapped(self, payload: str) -> None:
+        """Event forwarded from tap.js running inside the page."""
+        try:
+            obj = json.loads(payload)
+        except json.JSONDecodeError:
             return
-        blob = json.dumps(entry["json"], ensure_ascii=False)
-        print(f"{arrow} type={msg_type} {blob[:160]}", flush=True)
+        phase = obj.get("phase", "?")
+        url = str(obj.get("url", ""))
+        entry = {"kind": "tap", "phase": phase, "url": redact_url(url)}
+        for key in ("method", "ctype", "index", "chunks", "error"):
+            if key in obj:
+                entry[key] = obj[key]
+        for key in ("body", "chunk", "data"):
+            if key in obj and obj[key] is not None:
+                raw = str(obj[key])
+                try:
+                    entry[key] = redact_payload(json.loads(raw))
+                except json.JSONDecodeError:
+                    entry[key] = redact_text(raw[:8000])
+        self.write(entry)
 
-    def _write(self, obj: dict) -> None:
-        self.handle.write(json.dumps(obj, ensure_ascii=False) + "\n")
-        self.handle.flush()
+        short = url.split("?")[0][:95]
+        if phase in ("fetch-request", "xhr-request"):
+            blob = str(obj.get("body") or "")
+            if any(hint in blob for hint in PROMPT_HINTS):
+                self.chat_posts += 1
+                print(f"\n*** PROMPT SENT #{self.chat_posts} -> {short}\n", flush=True)
+            else:
+                print(f"--> [{phase}] {short}", flush=True)
+        elif phase in ("stream-chunk", "xhr-chunk", "sse"):
+            self.stream_chunks += 1
+            body = str(obj.get("chunk") or obj.get("data") or "")
+            print(f"<-- [{phase} {self.stream_chunks}] {body[:100]}", flush=True)
+        else:
+            print(f"    [{phase}] {short}", flush=True)
+
+    def sse_event(self, url: str, event: str, data: str) -> None:
+        entry: dict[str, Any] = {"kind": "sse", "url": redact_url(url), "event": event}
+        try:
+            entry["data"] = redact_payload(json.loads(data))
+        except json.JSONDecodeError:
+            entry["data_raw"] = data[:8000]
+        self.write(entry)
+        print(f"<-- [sse {event or 'message'}] {data[:110]}", flush=True)
 
     def close(self) -> None:
         self.handle.close()
 
 
-def attach(page, recorder: FrameRecorder) -> None:
-    def on_websocket(ws) -> None:
-        recorder.note_socket(ws.url)
-        ws.on("framesent", lambda p: recorder.record("sent", ws.url, p))
-        ws.on("framereceived", lambda p: recorder.record("recv", ws.url, p))
-        ws.on("close", lambda _: print("[ws] closed", flush=True))
-
-    page.on("websocket", on_websocket)
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--label",
-        required=True,
-        help="capture name, e.g. 'auto' or 'gpt56think' (becomes captures/<label>.jsonl)",
-    )
+    parser.add_argument("--label", required=True)
     parser.add_argument("--url", default=CHAT_URL)
-    parser.add_argument(
-        "--seconds",
-        type=int,
-        default=900,
-        help="how long to keep recording before closing (default 900)",
-    )
+    parser.add_argument("--seconds", type=int, default=900)
     args = parser.parse_args()
 
     CAPTURE_DIR.mkdir(exist_ok=True)
     PROFILE_DIR.mkdir(exist_ok=True)
     out_path = CAPTURE_DIR / f"{args.label}.jsonl"
-    recorder = FrameRecorder(out_path, args.label)
+    rec = Recorder(out_path)
 
     print(f"profile : {PROFILE_DIR}")
     print(f"writing : {out_path}")
-    print("\nThe browser is yours. Sign in if asked, set the model picker, send a")
-    print("prompt. Every frame lands in the file above. Ctrl+C when done.\n")
+    print("\nThe browser is yours. Set the model picker, send a prompt.")
+    print("Watch for a '*** chat POST' line -- that is the request we want.")
+    print("Ctrl+C when done.\n")
 
     with sync_playwright() as pw:
         context = pw.chromium.launch_persistent_context(
@@ -189,9 +314,54 @@ def main() -> int:
             viewport={"width": 1500, "height": 950},
             args=["--disable-blink-features=AutomationControlled"],
         )
+        # The in-page tap must be installed before any application script runs,
+        # so both of these happen before the first navigation.
+        context.expose_function("__wireTap", rec.tapped)
+        tap_source = (Path(__file__).parent / "tap.js").read_text(encoding="utf-8")
+        context.add_init_script(tap_source)
+
         page = context.pages[0] if context.pages else context.new_page()
-        attach(page, recorder)
-        context.on("page", lambda p: attach(p, recorder))
+
+        def attach(target_page) -> None:
+            def on_ws(ws) -> None:
+                rec.socket_open(ws.url)
+                ws.on("framesent", lambda p: rec.ws_frame("sent", ws.url, p))
+                ws.on("framereceived", lambda p: rec.ws_frame("recv", ws.url, p))
+
+            target_page.on("websocket", on_ws)
+
+            def on_request(req) -> None:
+                if is_telemetry(req.url):
+                    return
+                # Record every POST regardless of host: the prompt may go to a
+                # host we did not predict, and POSTs are rare next to asset GETs.
+                # GETs are filtered hard or the log becomes unreadable.
+                if req.method != "POST":
+                    if not interesting(req.url) or "chat" not in req.url.lower():
+                        return
+                try:
+                    body = req.post_data
+                except Exception:
+                    body = None
+                rec.http_request(req.method, req.url, body)
+
+            target_page.on("request", on_request)
+
+            # CDP gives us SSE events without blocking on the response body.
+            try:
+                cdp = context.new_cdp_session(target_page)
+                cdp.send("Network.enable")
+                cdp.on(
+                    "Network.eventSourceMessageReceived",
+                    lambda e: rec.sse_event(
+                        e.get("requestId", ""), e.get("eventName", ""), e.get("data", "")
+                    ),
+                )
+            except Exception as exc:
+                print(f"[warn] CDP attach failed: {exc}", flush=True)
+
+        attach(page)
+        context.on("page", attach)
 
         page.goto(args.url, wait_until="domcontentloaded")
 
@@ -202,9 +372,16 @@ def main() -> int:
         except KeyboardInterrupt:
             print("\n[stop] interrupted", flush=True)
         finally:
-            print(f"\n[done] {recorder.count} frames -> {out_path}", flush=True)
-            recorder.close()
-            context.close()
+            print(
+                f"\n[done] {rec.count} records, {rec.chat_posts} chat POST(s)"
+                f" -> {out_path}",
+                flush=True,
+            )
+            rec.close()
+            try:
+                context.close()
+            except Exception:
+                pass
 
     return 0
 
