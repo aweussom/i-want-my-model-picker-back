@@ -1,108 +1,120 @@
 """Resident browser that drives Microsoft 365 Copilot and reads its WebSocket.
 
-Two ideas carry this file.
+Three ideas carry this file.
 
-First, Playwright owns the browser but not the conversation. We type into the
-real composer and press Enter, then we read the reply off the WebSocket frames
-the page already receives instead of scraping rendered HTML. The DOM tells you
+Playwright owns the browser but not the conversation. We type into the real
+composer and press Enter, then read the reply off the Chathub WebSocket frames
+the page already receives instead of scraping rendered HTML. The DOM can tell you
 text stopped growing; the wire tells you the turn is *finished*, which is a
-different and much more useful fact.
+different and much more useful fact (`type: 3` closes the invocation).
 
-Second, Playwright's sync API objects belong to the thread that made them, so
-everything browser-shaped runs on one dedicated worker thread and callers talk
-to it over queues. That pattern is lifted from agentry's CopilotSDKBackend._call
-(https://github.com/aweussom/agentry, backends.py), which does the same trick to
-bridge an asyncio SDK onto a synchronous interface.
+Playwright's sync API objects belong to the thread that created them, so
+everything browser-shaped runs on one dedicated worker thread and callers talk to
+it over queues. That pattern comes from agentry's CopilotSDKBackend._call
+(https://github.com/aweussom/agentry, backends.py:205), which does the same trick
+to bridge an asyncio SDK onto a synchronous interface.
+
+`tone` — the field carrying model choice — is **per conversation**. A new chat
+resets to `Magic` no matter what was selected elsewhere. So changing model means
+starting a fresh conversation and setting the picker before the first send, which
+is why switch_tone() reloads the page.
 """
 
 from __future__ import annotations
 
+import json
 import queue
+import re
 import threading
 import time
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Iterator
 
 from playwright.sync_api import sync_playwright
 
-from capture import RECORD_SEPARATOR, redact_url, split_records
-
-import json
+from capture import redact_url, split_records
 
 CHAT_URL = "https://m365.cloud.microsoft/chat"
 PROFILE_DIR = Path(__file__).parent / ".profile"
 
-# Composer candidates, tried in order. The M365 chat surface has changed shape
-# several times; these cover the variants seen in the wild.
+# Discovered with probe_dom.py, not guessed. The composer is a <span> with
+# role="textbox"; tag-qualified selectors miss it. Match on role and
+# contenteditable, which do not change with UI language.
 COMPOSER_SELECTORS = (
-    'div[role="textbox"][contenteditable="true"]',
-    'textarea[placeholder*="Message"]',
-    'textarea[placeholder*="melding"]',
-    '[data-testid="chat-input"]',
-    'div[contenteditable="true"]',
+    '[role="textbox"][contenteditable="true"]',
+    '[contenteditable="true"][aria-label*="Copilot"]',
+    "textarea",
+    '[contenteditable="true"]',
 )
 
-SENTINEL_DONE = object()
+# The picker button's accessible name is localized ("Modellvelger" in Norwegian);
+# its inner text is the current selection.
+PICKER_SELECTORS = (
+    '[aria-label*="odellvelger"]',
+    '[aria-label*="odel"]',
+    "button[aria-haspopup]",
+)
+
+# tone value -> the picker entry that selects it. Section 2 entries live behind a
+# provider submenu that opens on hover.
+TONES: dict[str, dict[str, str]] = {
+    "Magic": {"label": "Auto", "title": "Auto", "owned_by": "microsoft"},
+    "Chat": {"label": "Quick response", "title": "Quick response", "owned_by": "microsoft"},
+    "Reasoning": {"label": "Think deeper", "title": "Think deeper", "owned_by": "microsoft"},
+    "Gpt_5_6_Reasoning": {
+        "label": "GPT 5.6 Think deeper",
+        "title": "GPT 5.6 Think deeper",
+        "owned_by": "openai",
+    },
+    "Gpt_5_5_Chat": {
+        "label": "GPT 5.5 Quick response",
+        "title": "GPT 5.5 Quick response",
+        "owned_by": "openai",
+    },
+}
+DEFAULT_TONE = "Magic"
+
+# Bot messages that are progress chatter rather than the answer. The real reply
+# arrives with no messageType at all and contentOrigin "DeepLeo".
+PROGRESS_TYPES = {
+    "Progress",
+    "InternalLoaderMessage",
+    "InternalSearchQuery",
+    "InternalSearchResult",
+    "RenderCardRequest",
+    "SearchQuery",
+    "GeneratedCode",
+    "Disengaged",
+}
+
+CITATION_RE = re.compile(r"\[\^(\d+)\^\]")
 
 
-def extract_deltas(payload: dict[str, Any]) -> tuple[list[str], bool]:
-    """Pull assistant text out of one parsed SignalR record.
-
-    Returns (text_fragments, turn_finished).
-
-    This is the only wire-format-specific function in the project. BizChat
-    streams partial text in type=1 records and delivers the settled turn in a
-    type=2 record; type=3 closes the invocation. Response shapes drift, so this
-    reads defensively and treats anything unrecognised as "no text".
-    """
-    fragments: list[str] = []
-    msg_type = payload.get("type")
-
-    def harvest(messages: Any) -> None:
-        if not isinstance(messages, list):
-            return
-        for msg in messages:
-            if not isinstance(msg, dict):
-                continue
-            if msg.get("author") != "bot":
-                continue
-            if msg.get("messageType") not in (None, "Chat"):
-                continue  # skip Diagnostics / InternalSearchQuery chatter
-            text = msg.get("text")
-            if isinstance(text, str) and text:
-                fragments.append(text)
-
-    if msg_type == 1:
-        for arg in payload.get("arguments") or []:
-            if isinstance(arg, dict):
-                harvest(arg.get("messages"))
-    elif msg_type == 2:
-        item = payload.get("item")
-        if isinstance(item, dict):
-            harvest(item.get("messages"))
-        return fragments, True
-    elif msg_type == 3:
-        return fragments, True
-
-    return fragments, False
+def is_chathub(url: str) -> bool:
+    low = url.lower()
+    return "chathub" in low or ("substrate" in low and "copilot" in low)
 
 
 class CopilotDriver:
     """Owns one browser on one thread; serialises turns."""
 
-    def __init__(self, headless: bool = False, url: str = CHAT_URL) -> None:
+    def __init__(self, headless: bool = False, url: str = CHAT_URL,
+                 profile: str | None = None) -> None:
         self._url = url
         self._headless = headless
+        self._profile = profile or str(PROFILE_DIR)
         self._commands: queue.Queue = queue.Queue()
         self._events: queue.Queue = queue.Queue()
         self._turn_lock = threading.Lock()
         self._ready = threading.Event()
         self._error: BaseException | None = None
         self._socket_url: str | None = None
+        self._current_tone: str = DEFAULT_TONE
+        self._cancel_requested = False
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
-    # --- browser thread ---------------------------------------------------
+    # --- frame handling (runs on the browser thread) ----------------------
 
     def _on_frame(self, payload: str | bytes) -> None:
         if isinstance(payload, bytes):
@@ -115,18 +127,51 @@ class CopilotDriver:
                 parsed = json.loads(record)
             except json.JSONDecodeError:
                 continue
-            if not isinstance(parsed, dict):
+            if isinstance(parsed, dict):
+                self._handle_record(parsed)
+
+    def _handle_record(self, rec: dict) -> None:
+        msg_type = rec.get("type")
+
+        if msg_type == 1:
+            for arg in rec.get("arguments") or []:
+                if isinstance(arg, dict):
+                    self._harvest(arg.get("messages"))
+        elif msg_type == 2:
+            item = rec.get("item")
+            if isinstance(item, dict):
+                self._harvest(item.get("messages"))
+                result = item.get("result") or {}
+                if result.get("value") not in (None, "Success"):
+                    self._events.put(
+                        ("error", f"{result.get('value')}: {result.get('message')}")
+                    )
+            self._events.put(("done", None))
+        elif msg_type == 3:
+            self._events.put(("done", None))
+
+    def _harvest(self, messages: object) -> None:
+        if not isinstance(messages, list):
+            return
+        for msg in messages:
+            if not isinstance(msg, dict) or msg.get("author") != "bot":
                 continue
-            fragments, finished = extract_deltas(parsed)
-            for fragment in fragments:
-                self._events.put(("text", fragment))
-            if finished:
-                self._events.put(("done", None))
+            text = msg.get("text")
+            if not isinstance(text, str) or not text:
+                continue
+            kind = msg.get("messageType")
+            if kind in PROGRESS_TYPES:
+                self._events.put(("progress", text))
+            elif kind in (None, "Chat"):
+                self._events.put(("text", (msg.get("messageId") or "answer", text)))
+
+    # --- browser thread --------------------------------------------------
 
     def _attach(self, page) -> None:
         def on_websocket(ws) -> None:
-            if "chathub" in ws.url.lower() or "substrate" in ws.url.lower():
+            if is_chathub(ws.url):
                 self._socket_url = redact_url(ws.url)
+                print(f"[driver] chathub attached: {self._socket_url[:90]}", flush=True)
                 ws.on("framereceived", self._on_frame)
 
         page.on("websocket", on_websocket)
@@ -141,11 +186,88 @@ class CopilotDriver:
                 continue
         return None
 
+    def _wait_composer(self, page, attempts: int = 120):
+        for _ in range(attempts):
+            box = self._find_composer(page)
+            if box is not None:
+                return box
+            page.wait_for_timeout(500)
+        return None
+
+    def _select_tone(self, page, tone: str) -> bool:
+        """Set the picker. Returns True if the wanted entry was clicked."""
+        wanted = TONES.get(tone, {}).get("label")
+        if not wanted:
+            return False
+
+        trigger = None
+        for selector in PICKER_SELECTORS:
+            candidate = page.locator(selector).first
+            try:
+                if candidate.count() and candidate.is_visible():
+                    trigger = candidate
+                    break
+            except Exception:
+                continue
+        if trigger is None:
+            return False
+
+        trigger.click(timeout=5000)
+        page.wait_for_timeout(2500)   # the menu takes well over a second
+
+        def items():
+            found = []
+            for role in ("menuitemradio", "menuitem", "option"):
+                try:
+                    for item in page.get_by_role(role).all():
+                        try:
+                            if item.is_visible():
+                                flat = " ".join((item.inner_text() or "").split())
+                                found.append((item, role, flat))
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+            return found
+
+        def click_match(collection) -> bool:
+            for item, _role, text in collection:
+                if wanted.lower() in text.lower():
+                    try:
+                        item.click(timeout=5000)
+                        page.wait_for_timeout(900)
+                        return True
+                    except Exception:
+                        continue
+            return False
+
+        current = items()
+        if click_match(current):
+            return True
+
+        # Named models sit behind a provider submenu that opens on HOVER.
+        # Clicking the parent collapses it and loses the nested entries.
+        for item, role, text in current:
+            if role == "menuitem" and ("gpt" in text.lower() or "openai" in text.lower()):
+                try:
+                    item.hover()
+                    page.wait_for_timeout(2200)
+                except Exception:
+                    continue
+                if click_match(items()):
+                    return True
+
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
+        return False
+
     def _run(self) -> None:
         try:
             with sync_playwright() as pw:
                 context = pw.chromium.launch_persistent_context(
-                    user_data_dir=str(PROFILE_DIR),
+                    user_data_dir=self._profile,
                     headless=self._headless,
                     viewport={"width": 1500, "height": 950},
                     args=["--disable-blink-features=AutomationControlled"],
@@ -155,50 +277,77 @@ class CopilotDriver:
                 context.on("page", self._attach)
                 page.goto(self._url, wait_until="domcontentloaded")
 
-                # Wait for a composer, i.e. for the human to finish signing in.
-                composer = None
-                for _ in range(600):
-                    composer = self._find_composer(page)
-                    if composer is not None:
-                        break
-                    page.wait_for_timeout(500)
-                if composer is None:
+                if self._wait_composer(page) is None:
                     raise RuntimeError(
-                        "No composer found. Sign in with capture.py first so the "
-                        "profile holds a session."
+                        "No composer found. Sign in once with "
+                        "`python capture.py --label signin` so the profile holds a session."
                     )
+                page.wait_for_timeout(2000)
                 self._ready.set()
 
                 while True:
-                    command = self._commands.get()
+                    # Playwright's sync API dispatches event callbacks only while
+                    # this thread is inside a Playwright call. Blocking on
+                    # queue.get() here silently starves every "framereceived"
+                    # handler, so the reply frames never arrive. Poll the queue
+                    # and spend the idle time inside wait_for_timeout, which
+                    # pumps the event loop.
+                    try:
+                        command = self._commands.get_nowait()
+                    except queue.Empty:
+                        try:
+                            page.wait_for_timeout(150)
+                        except Exception:
+                            break
+                        continue
                     if command is None:
                         break
-                    text = command
+                    text, tone = command
+
+                    # tone is per-conversation, so a change needs a fresh chat.
+                    if tone != self._current_tone:
+                        page.goto(self._url, wait_until="domcontentloaded")
+                        if self._wait_composer(page) is None:
+                            self._events.put(("error", "composer lost after reload"))
+                            self._events.put(("done", None))
+                            continue
+                        page.wait_for_timeout(2500)
+                        print(f"[driver] switching tone -> {tone}", flush=True)
+                        if self._select_tone(page, tone):
+                            self._current_tone = tone
+                            print(f"[driver] tone now {tone}", flush=True)
+                        else:
+                            self._events.put(
+                                ("progress", f"[could not select {tone}; using current]\n")
+                            )
+                            self._current_tone = DEFAULT_TONE
+
                     composer = self._find_composer(page)
                     if composer is None:
                         self._events.put(("error", "composer vanished"))
                         self._events.put(("done", None))
                         continue
-                    composer.click()
-                    # Clear whatever is there. fill() works on contenteditable
-                    # too, but throws on some rich composers, so fall back to a
-                    # select-all delete.
                     try:
-                        composer.fill("")
-                    except Exception:
-                        page.keyboard.press("Control+A")
-                        page.keyboard.press("Delete")
-                    composer.type(text, delay=8)
-                    page.keyboard.press("Enter")
+                        composer.click()
+                        try:
+                            composer.fill("")
+                        except Exception:
+                            page.keyboard.press("Control+A")
+                            page.keyboard.press("Delete")
+                        composer.type(text, delay=8)
+                        page.keyboard.press("Enter")
+                    except Exception as exc:
+                        self._events.put(("error", f"send failed: {exc!r}"))
+                        self._events.put(("done", None))
 
                 context.close()
-        except BaseException as exc:  # surfaced to callers
+        except BaseException as exc:
             self._error = exc
             self._ready.set()
             self._events.put(("error", repr(exc)))
             self._events.put(("done", None))
 
-    # --- public API -------------------------------------------------------
+    # --- public API ------------------------------------------------------
 
     def wait_ready(self, timeout: float = 300.0) -> None:
         if not self._ready.wait(timeout):
@@ -210,22 +359,43 @@ class CopilotDriver:
     def socket_url(self) -> str | None:
         return self._socket_url
 
-    def prompt(self, text: str, timeout: float = 180.0) -> Iterator[str]:
-        """Send one prompt; yield assistant text as it arrives.
+    @property
+    def current_tone(self) -> str:
+        return self._current_tone
 
-        BizChat re-sends the whole message body as it grows rather than emitting
-        pure deltas, so we track the longest prefix seen and yield only the tail.
+    def is_alive(self) -> bool:
+        return self._thread.is_alive() and self._error is None
+
+    def cancel(self) -> bool:
+        self._cancel_requested = True
+        return True
+
+    def prompt(self, text: str, tone: str = DEFAULT_TONE,
+               timeout: float = 240.0) -> Iterator[tuple[str, str]]:
+        """Send one prompt; yield ("text"|"reasoning", delta) as it arrives.
+
+        Copilot re-sends the whole message body as it grows rather than emitting
+        pure deltas, so the longest prefix seen per message id is tracked and only
+        the new tail is yielded.
         """
         self.wait_ready()
         with self._turn_lock:
+            self._cancel_requested = False
             while not self._events.empty():
-                self._events.get_nowait()
+                try:
+                    self._events.get_nowait()
+                except queue.Empty:
+                    break
 
-            self._commands.put(text)
+            self._commands.put((text, tone))
             deadline = time.monotonic() + timeout
-            emitted = ""
+            emitted: dict[str, str] = {}
+            progress_seen: set[str] = set()
+            got_answer = False
 
             while True:
+                if self._cancel_requested:
+                    return
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError("no completion frame before timeout")
@@ -235,18 +405,24 @@ class CopilotDriver:
                     continue
 
                 if kind == "text":
-                    if value.startswith(emitted):
-                        tail = value[len(emitted):]
-                        if tail:
-                            emitted = value
-                            yield tail
-                    elif len(value) > len(emitted):
-                        emitted = value
-                        yield value
+                    message_id, full = value
+                    full = CITATION_RE.sub("", full)
+                    previous = emitted.get(message_id, "")
+                    if full.startswith(previous):
+                        tail = full[len(previous):]
                     else:
-                        yield value
+                        tail = full
+                    if tail:
+                        emitted[message_id] = full
+                        got_answer = True
+                        yield ("text", tail)
+                elif kind == "progress":
+                    if value not in progress_seen:
+                        progress_seen.add(value)
+                        yield ("reasoning", value + "\n")
                 elif kind == "error":
-                    raise RuntimeError(f"driver error: {value}")
+                    if not got_answer:
+                        raise RuntimeError(f"driver error: {value}")
                 elif kind == "done":
                     return
 

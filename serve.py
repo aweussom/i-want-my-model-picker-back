@@ -1,14 +1,22 @@
-"""OpenAI-compatible endpoint in front of the resident Copilot browser.
+"""OpenAI-compatible endpoint (and a chat UI) in front of a resident Copilot browser.
 
     python serve.py --port 8790
 
-Then point anything that speaks OpenAI at it:
+Then open http://127.0.0.1:8790/ for the chat interface, or point anything that
+speaks OpenAI at the same port:
 
     curl http://127.0.0.1:8790/v1/chat/completions -H "Content-Type: application/json" \
-      -d '{"model":"m365-copilot","stream":true,"messages":[{"role":"user","content":"hi"}]}'
+      -d '{"model":"Gpt_5_6_Reasoning","stream":true,
+           "messages":[{"role":"user","content":"hi"}]}'
+
+The joke, such as it is: the `model` parameter works. Microsoft's official Copilot
+Chat API has no such parameter, and this one maps straight onto the `tone` field
+the web client already sends. `GET /v1/models` lists the five values.
 
 One browser means one conversation at a time; CopilotDriver serialises turns
-behind a lock, so concurrent callers queue rather than interleave.
+behind a lock, so concurrent callers queue rather than interleave. Because `tone`
+is per-conversation, changing `model` between requests starts a new Copilot
+conversation and the prior context is gone.
 """
 
 from __future__ import annotations
@@ -18,21 +26,28 @@ import json
 import time
 import uuid
 
-from flask import Flask, Response, jsonify, request
+from flask import Flask, Response, jsonify, render_template, request
 
-from driver import CopilotDriver
+from driver import DEFAULT_TONE, TONES, CopilotDriver
 
 app = Flask(__name__)
 _driver: CopilotDriver | None = None
-MODEL_LABEL = "m365-copilot"
 
 
-def _sse(delta: str, model: str, done: bool = False) -> str:
+def _sse(delta: str, model: str, done: bool = False, reasoning: bool = False) -> str:
     """Encode one OpenAI streaming chunk.
 
-    Lifted from agentry (https://github.com/aweussom/agentry, agentry.py:125),
-    trimmed to the text-only case.
+    Lifted from agentry (https://github.com/aweussom/agentry, agentry.py:125).
+    Reasoning deltas ride in "reasoning_content", the de-facto extension DeepSeek
+    popularised; standard OpenAI clients ignore the unknown key, and the bundled
+    UI folds them into its think-block.
     """
+    if done:
+        payload: dict = {}
+    elif reasoning:
+        payload = {"reasoning_content": delta}
+    else:
+        payload = {"content": delta}
     chunk = {
         "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
         "object": "chat.completion.chunk",
@@ -41,7 +56,7 @@ def _sse(delta: str, model: str, done: bool = False) -> str:
         "choices": [
             {
                 "index": 0,
-                "delta": {} if done else {"content": delta},
+                "delta": payload,
                 "finish_reason": "stop" if done else None,
             }
         ],
@@ -52,9 +67,37 @@ def _sse(delta: str, model: str, done: bool = False) -> str:
     return out
 
 
+def _resolve_tone(requested: str | None) -> str:
+    """Map an OpenAI `model` value onto a tone, tolerantly."""
+    if not requested:
+        return DEFAULT_TONE
+    if requested in TONES:
+        return requested
+    # Accept the menu label too ("GPT 5.6 Think deeper"), and ignore any
+    # "@suffix" the UI appends for display purposes.
+    bare = requested.split("@")[0].strip().lower()
+    for tone, meta in TONES.items():
+        if bare == tone.lower() or bare == meta["label"].lower():
+            return tone
+    return DEFAULT_TONE
+
+
+def _has_image(body: dict) -> bool:
+    for message in body.get("messages") or []:
+        content = message.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    return True
+    return False
+
+
 def _last_user_message(body: dict) -> str:
-    """Flatten the newest user turn. No history is replayed: the browser holds
-    the conversation, so sending prior turns would duplicate them."""
+    """Flatten the newest user turn.
+
+    History is deliberately not replayed: the browser holds the conversation, so
+    sending prior turns would duplicate them.
+    """
     for message in reversed(body.get("messages") or []):
         if message.get("role") != "user":
             continue
@@ -71,13 +114,23 @@ def _last_user_message(body: dict) -> str:
     return ""
 
 
+@app.route("/")
+def index():
+    return render_template("index.html")
+
+
 @app.route("/health")
 def health() -> Response:
-    ready = _driver is not None and _driver._ready.is_set()
+    ready = _driver is not None and _driver._ready.is_set() and _driver.is_alive()
+    # Report only whether the Chathub is attached. The full URL embeds the user
+    # object id, the tenant id and a wall of feature flags -- fine in a capture
+    # you control, needless exposure in a status endpoint somebody may screenshot.
+    socket = _driver.socket_url if _driver else None
     return jsonify(
         {
             "status": "ready" if ready else "loading",
-            "socket": _driver.socket_url if _driver else None,
+            "tone": _driver.current_tone if _driver else None,
+            "chathub": bool(socket),
         }
     )
 
@@ -87,9 +140,24 @@ def models() -> Response:
     return jsonify(
         {
             "object": "list",
-            "data": [{"id": MODEL_LABEL, "object": "model", "owned_by": "microsoft"}],
+            "data": [
+                {
+                    "id": tone,
+                    "object": "model",
+                    "owned_by": meta["owned_by"],
+                    "description": meta["title"],
+                }
+                for tone, meta in TONES.items()
+            ],
         }
     )
+
+
+@app.route("/v1/cancel", methods=["POST"])
+def cancel() -> Response:
+    if _driver and _driver.cancel():
+        return jsonify({"cancelled": True})
+    return jsonify({"cancelled": False})
 
 
 @app.route("/v1/chat/completions", methods=["POST"])
@@ -100,21 +168,40 @@ def chat_completions():
         return jsonify({"error": {"message": "no user message"}}), 400
 
     assert _driver is not None
+    tone = _resolve_tone(body.get("model"))
     stream = bool(body.get("stream"))
+
+    # This driver types text into the composer, so it does not forward
+    # attachments *yet*. The backend itself clearly supports vision: the captured
+    # invocation carries optionsSets including cwcfluxgptv, gptvnorm2048 and
+    # flux_v3_gptv_enable_upload_multi_image_in_turn_wo_ch, plus an empty
+    # message.adaptiveCards array. Finding the upload path is a capture away.
+    dropped = (
+        "[note: this driver does not forward image attachments yet]\n"
+        if _has_image(body)
+        else ""
+    )
 
     if stream:
         def generate():
+            if dropped:
+                yield _sse(dropped, tone, reasoning=True)
             try:
-                for delta in _driver.prompt(prompt):
-                    yield _sse(delta, MODEL_LABEL)
+                for kind, delta in _driver.prompt(prompt, tone=tone):
+                    yield _sse(delta, tone, reasoning=(kind == "reasoning"))
             except Exception as exc:
-                yield _sse(f"\n[error: {exc}]", MODEL_LABEL)
-            yield _sse("", MODEL_LABEL, done=True)
+                yield _sse(f"\n[error: {exc}]", tone)
+            yield _sse("", tone, done=True)
 
-        return Response(generate(), mimetype="text/event-stream")
+        response = Response(generate(), mimetype="text/event-stream")
+        response.headers["X-Device"] = tone
+        response.headers["Cache-Control"] = "no-cache"
+        return response
 
     try:
-        text = "".join(_driver.prompt(prompt))
+        text = "".join(
+            delta for kind, delta in _driver.prompt(prompt, tone=tone) if kind == "text"
+        )
     except Exception as exc:
         return jsonify({"error": {"message": str(exc)}}), 502
 
@@ -123,7 +210,7 @@ def chat_completions():
             "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
             "object": "chat.completion",
             "created": int(time.time()),
-            "model": MODEL_LABEL,
+            "model": tone,
             "choices": [
                 {
                     "index": 0,
@@ -143,15 +230,22 @@ def main() -> int:
     parser.add_argument(
         "--headless",
         action="store_true",
-        help="hide the browser (only works once the profile has a live session)",
+        help="hide the browser; only works once the profile holds a live session",
+    )
+    parser.add_argument(
+        "--profile",
+        default=None,
+        help="browser profile dir. Keep work and personal accounts in separate "
+        "profiles, e.g. --profile .profile-personal",
     )
     args = parser.parse_args()
 
     print("starting browser...")
-    _driver = CopilotDriver(headless=args.headless)
+    _driver = CopilotDriver(headless=args.headless, profile=args.profile)
     _driver.wait_ready()
-    print(f"composer ready; socket: {_driver.socket_url}")
-    print(f"listening on http://{args.host}:{args.port}/v1/chat/completions")
+    print(f"composer ready; tone={_driver.current_tone}")
+    print(f"chat UI      http://{args.host}:{args.port}/")
+    print(f"OpenAI API   http://{args.host}:{args.port}/v1/chat/completions")
 
     # threaded=False: every turn serialises on the driver lock anyway, and a
     # single request thread keeps the failure modes boring.
