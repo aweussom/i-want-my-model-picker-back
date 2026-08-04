@@ -49,7 +49,6 @@ the chat invocation, a sibling of the message rather than a property of it.
 `tone` is inherited from Bing Chat. In Bing, `tone` was Creative / Balanced /
 Precise — the little personality slider. Microsoft kept the field and repurposed
 it to carry which large language model answers you and how hard it thinks.
-Are they lazy or incompetent? Nobody knows.
 
 Two runs. Same prompt. Same everything. Picker moved from Auto to GPT 5.6 Think
 deeper:

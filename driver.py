@@ -89,7 +89,22 @@ PROGRESS_TYPES = {
     "Disengaged",
 }
 
-CITATION_RE = re.compile(r"\[\^(\d+)\^\]")
+# Copilot marks citations two different ways. `hiddenText` uses the Bing-style
+# [^1^]. The streamed `text` wraps them in Unicode private-use sentinels:
+# U+E200 opens, U+E202 separates, U+E201 closes. Those code points have no glyph
+# in any normal font, so leaving them in means the client renders a row of tofu
+# boxes -- which is exactly what happened.
+#
+# Written with explicit \ueNNN escapes on purpose. An earlier version embedded
+# the literal characters, which are invisible to every editor and reader; they
+# were silently lost in an edit and left an invalid pattern behind.
+CITATION_RE = re.compile(
+    "\ue200.*?\ue201"            # a complete sentinel-wrapped citation span
+    "|\ue200[^\ue201]*$"         # an unterminated span at the end of a delta
+    r"|\[\^\d+\^\]"                # the Bing-style marker used in hiddenText
+    "|[\ue200-\ue20f]",          # any stray sentinel that escaped the above
+    re.DOTALL,
+)
 DATA_URI_RE = re.compile(r"^data:(?P<mime>[\w.+/-]+);base64,(?P<data>.+)$", re.DOTALL)
 
 EXTENSION_FOR_MIME = {
