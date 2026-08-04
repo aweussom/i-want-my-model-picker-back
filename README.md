@@ -105,7 +105,17 @@ published descriptions are substantially correct. `tone` is the part they miss.
 | `inspect_capture.py` | Summarises a capture: endpoints, streams, model-selector candidates. |
 | `probe_dom.py` | Dumps the page's real inputs and buttons, so selectors are based on fact. |
 | `find_tones.py` | Scrapes the tone enum from the app's own JavaScript bundles. |
-| `serve.py` / `driver.py` | OpenAI-compatible endpoint over a resident browser. |
+| `serve.py` / `driver.py` | OpenAI-compatible endpoint over a resident browser. **Unfinished — see below.** |
+
+Everything above `serve.py` has been run against a live tenant and produced the
+result documented here. `serve.py` and `driver.py` have **never been executed**.
+They were written before the reconnaissance was done and have not caught up:
+`driver.py` still looks for a `div[role="textbox"]` composer, which does not
+exist, so it fails at startup. Its frame-reading half should be sound — it
+filters for the Chathub socket and its `extract_deltas()` matches the real
+`type: 2` frames — but treat the pair as a sketch, not a working server. There is
+no chat UI in this repo; `serve.py` serves `/health`, `/v1/models` and
+`/v1/chat/completions` and nothing else.
 
 ### Reproducing the finding
 
