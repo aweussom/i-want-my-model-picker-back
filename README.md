@@ -94,6 +94,50 @@ framing, `ua=BizChat`) carrying auth and presence signalling with no chat
 content — so "no Chathub" was an artifact of never having sent a prompt. The
 published descriptions are substantially correct. `tone` is the part they miss.
 
+## Image attachments
+
+Images do not travel in the chat frame. They go to a separate endpoint first,
+and the frame that follows references them **not at all**.
+
+```
+POST https://substrate.office.com/m365Copilot/UploadFile
+Content-Type: multipart/form-data
+
+scenario      = UploadImage
+conversationId = <guid>
+FileBase64    = data:image/png;base64,iVBORw0KGgoAAAANSUhEUg…
+optionsSets   = cwcgptvsan
+optionsSets   = flux_v3_gptv_enable_upload_multi_image_in_turn_wo_ch
+optionsSets   = gptvnorm2048
+```
+
+Response:
+
+```json
+{
+  "fileName": "0588acdec7.png", "fileSize": 248736, "fileType": ".png",
+  "tokenSize": 0, "isLongContext": false,
+  "docId": "0-neu-d9-de6bf35cdb93dbfe0cd82615b0fcd808",
+  "fileSanitizer": "ImageSanitizerBingAI",
+  "conversationId": "eb6ec1d7-…",
+  "result": {"value": "Success", "message": "Success"}
+}
+```
+
+The interesting part: the subsequent `type: 4` invocation contains no `docId`, no
+attachment array, and an empty `message.adaptiveCards`. The upload carries
+`conversationId`, so the image is bound to the **conversation server-side** and
+the prompt is just a prompt. Verified by generating a 256×256 gradient PNG,
+uploading it, and asking for a description — the reply was "A smooth gradient
+blending blue, green, yellow, orange, pink, and purple colors across the image."
+
+So `driver.py` *could* support images: POST the base64 with the live
+`conversationId`, then send text as usual. It does not do this yet.
+
+A note on the sanitizer: a 77-byte 8×8 PNG was rejected with
+`{"fileSanitizer": "None", "result": {"value": "InvalidRequest"}}`. Use a
+realistically sized image when testing.
+
 ## Tools
 
 | Script | Job |

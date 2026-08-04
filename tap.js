@@ -41,8 +41,29 @@
 
       method = (init.method || (req && req.method) || "GET").toUpperCase();
 
-      if (typeof init.body === "string") {
-        body = init.body;
+      const raw = (init.body !== undefined && init.body !== null) ? init.body : null;
+      if (typeof raw === "string") {
+        body = raw;
+      } else if (raw instanceof FormData) {
+        // File uploads arrive as multipart FormData, which is not a string and
+        // was previously invisible. Describe the parts rather than the bytes.
+        const parts = [];
+        for (const [k, v] of raw.entries()) {
+          if (v && typeof v === "object" && "name" in v) {
+            parts.push({field: k, filename: v.name, type: v.type, size: v.size});
+          } else {
+            parts.push({field: k, value: String(v).slice(0, 400)});
+          }
+        }
+        body = JSON.stringify({__formdata: parts});
+      } else if (raw instanceof Blob) {
+        body = JSON.stringify({__blob: {type: raw.type, size: raw.size}});
+      } else if (raw instanceof ArrayBuffer) {
+        body = JSON.stringify({__arraybuffer: {byteLength: raw.byteLength}});
+      } else if (raw && typeof raw === "object" && !(raw instanceof URLSearchParams)) {
+        try { body = JSON.stringify(raw); } catch (_) { body = "[unserialisable body]"; }
+      } else if (raw instanceof URLSearchParams) {
+        body = raw.toString();
       } else if (req && typeof req.clone === "function" && method !== "GET") {
         // A Request carries its body on the object, not in init.
         try { body = await req.clone().text(); } catch (_) {}
