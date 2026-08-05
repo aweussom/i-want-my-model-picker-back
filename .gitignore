@@ -12,3 +12,6 @@ captures/
 .venv/
 __pycache__/
 *.pyc
+
+# Article draft: kept locally, not published here.
+devto-post.md

@@ -7,9 +7,9 @@ Copilot's GUI has a model picker. Microsoft's official Copilot Chat API has no
 model parameter. Microsoft is also deleting the picker. This works out what the
 web client sends when you touch that dropdown, and puts an API in front of it.
 
-> For the light-hearted version — including the part where I confidently
-> published the wrong answer — see the write-up: [devto-post.md](devto-post.md).
-> *(Swap this for the dev.to URL once it goes live.)*
+> A light-hearted write-up of how this was worked out — including the part where I
+> confidently published the wrong answer — is coming to dev.to.
+> *(Link goes here once it is live.)*
 
 **What this does not fix.** Nothing here removes the business harness. The chat
 payload carries 34 `optionsSets` flags and 31 permitted message types, and GPT 5.6
