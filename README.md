@@ -450,11 +450,25 @@ because it is part of the same licensing story. Signing into
 > *"Oppgrader Microsoft 365 til å bruke Copilot Chat"* — upgrade your Microsoft
 > 365 subscription to use Copilot Chat.
 
-So this surface is work/school only unless you pay for a Microsoft 365
-subscription. Between that and the official Chat API requiring the separate
-Copilot **add-on** licence, there is no free route to the thing this project
-drives. The consumer product at `copilot.microsoft.com` is a different backend
-and none of the findings here have been tested against it.
+**And then it worked.** On the next sign-in, the same free consumer account had
+Copilot Chat, with no subscription and nothing bought in between. The picker
+offered only the three generic modes — Auto, Quick response, Think deeper — but
+the surface itself was reachable.
+
+So the honest state is: a personal account got an upsell wall once and worked
+once, and this project does not know why. A staged rollout, an experiment bucket,
+or a transient failure are all consistent with two observations. What would settle
+it is `licenseType` from `GET /health` on that account, which is reported
+precisely so this kind of question has an answer instead of an anecdote.
+
+An earlier version of this section stated flatly that there was no free route.
+That was one observation written up as a conclusion, and it is the second time
+this project has done that — the first was declaring the substrate Chathub dead
+before ever pressing Enter. Both are recorded rather than quietly edited out,
+because the pattern is more useful than either claim.
+
+The consumer product at `copilot.microsoft.com` is a different backend and none of
+these findings have been tested against it.
 
 ## Credit
 

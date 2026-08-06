@@ -9,12 +9,16 @@
 
 - Remove the dead `SENTINEL_DONE` constant in `driver.py`.
 
-- **A personal Microsoft account cannot reach this surface at all.** Signing into
-  `m365.cloud.microsoft/chat` with a free consumer account returns "Oppgrader
-  Microsoft 365 til a bruke Copilot Chat" -- an upsell wall. So the plan of
-  reproducing everything on a personal account, to keep a work tenant out of it,
-  is closed unless you buy a Microsoft 365 subscription. Everything documented
-  here therefore comes from one work tenant on `licenseType=Starter`.
+- **Whether a free personal account can reach this surface is unresolved.** It
+  showed an upsell wall ("Oppgrader Microsoft 365 til a bruke Copilot Chat") on one
+  sign-in and worked on the next, with nothing bought in between and only the three
+  generic tones offered. Rollout, experiment bucket or transient failure all fit two
+  observations. Settle it by reading `licenseType` from `GET /health` on that
+  account after sending one message, and record the answer here.
+
+  Worth doing because it decides the provenance question: if a personal account
+  works, everything documented here can be reproduced without involving an
+  employer's tenant.
 
 - Untested: whether any of this applies to the consumer product at
   `copilot.microsoft.com`. It is a different backend, so `tone` may not exist
