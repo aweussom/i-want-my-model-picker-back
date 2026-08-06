@@ -7,6 +7,12 @@ Copilot's GUI has a model picker. Microsoft's official Copilot Chat API has no
 model parameter. Microsoft is also deleting the picker. This works out what the
 web client sends when you touch that dropdown, and puts an API in front of it.
 
+### ⬇ [Download the Windows installer](https://github.com/aweussom/i-want-my-model-picker-back/releases/latest)
+
+Unsigned, so SmartScreen will object — build it yourself from `electron/` if that
+bothers you, which is a reasonable position for a tool that drives your Microsoft
+session. Everything below is how it works and how it was found.
+
 > A light-hearted write-up of how this was worked out — including the part where I
 > confidently published the wrong answer — is coming to dev.to.
 > *(Link goes here once it is live.)*
