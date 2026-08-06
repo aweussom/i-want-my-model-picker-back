@@ -131,3 +131,28 @@ machine you cannot inspect:
 On an account without named models the same call reports
 `"availableTones":["Magic","Chat","Reasoning"]` and `"defaultTone":"Reasoning"`.
 Tenant and user object ids are deliberately not included.
+
+## Chrome's warning bar, twice
+
+Two rounds of *"Du bruker et kommandolinjeflagg som ikke håndteres"*, and neither
+flag turned out to be needed.
+
+**`--no-sandbox`** was Playwright's. It disables the Chromium sandbox by default,
+which goes unremarked with its own bundled build but makes a branded Chrome object
+— correctly, since this browser is signed into a real Microsoft account and
+browsing the real web. Fixed with `chromiumSandbox: true`.
+
+**`--disable-blink-features=AutomationControlled`** was mine, the usual trick for
+hiding `navigator.webdriver`. It was a defensive reflex rather than a requirement:
+removing it changed nothing about whether Copilot works, and it kept a warning bar
+on screen for a speculative benefit. Gone.
+
+The bar's absence is measurable rather than assumed. With `viewport: null`,
+compare `window.outerHeight - window.innerHeight`:
+
+| Launch args | Browser UI |
+|---|---|
+| `--disable-blink-features=AutomationControlled` | 151 px |
+| none | 95 px |
+
+That 56 px is the infobar. None of Playwright's own default flags trigger it.

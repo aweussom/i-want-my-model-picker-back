@@ -222,7 +222,17 @@ class CopilotDriver {
     const opts = {
       headless: this.headless,
       viewport: { width: 1500, height: 950 },
-      args: ['--disable-blink-features=AutomationControlled'],
+      // No extra args on purpose.
+      //
+      // This used to pass --disable-blink-features=AutomationControlled, the
+      // usual trick for hiding navigator.webdriver. It was a defensive reflex,
+      // not a requirement: nothing in Copilot appears to check, and everything
+      // works without it. Meanwhile a branded Chrome puts "Du bruker et
+      // kommandolinjeflagg som ikke handteres" across the top of the window on
+      // every launch, which is a real cost for a speculative benefit. Removing
+      // it also keeps this on the right side of "automating my own session"
+      // rather than "evading detection".
+      args: [],
       // Playwright disables the Chromium sandbox by default, which means it
       // passes --no-sandbox. Invisible with its own bundled Chromium, but a
       // branded Chrome shows "You are using an unsupported command-line flag"
