@@ -1,0 +1,490 @@
+'use strict';
+/**
+ * Resident browser that drives Microsoft 365 Copilot and reads its WebSocket.
+ *
+ * Port of the Python driver, and the port deletes an entire class of bug.
+ *
+ * Playwright's *synchronous* Python API dispatches event callbacks only while
+ * the owning thread is inside a Playwright call, so the Python version needs a
+ * dedicated worker thread, two queues, and a command loop that must never block
+ * on queue.get() -- getting that wrong silently starved every framereceived
+ * handler and the browser answered correctly while the API timed out.
+ *
+ * Node's Playwright is async by construction. There is no thread to confine, no
+ * pump to starve, and the bug is not expressible. What is left is an event
+ * emitter and an async generator.
+ *
+ * Everything else is the same hard-won detail: the composer is a <span> with
+ * role="textbox", named models sit behind a submenu that opens on HOVER, `tone`
+ * is per conversation, and uploads bind to the conversation server-side.
+ */
+
+const path = require('path');
+const os = require('os');
+const fs = require('fs/promises');
+const { chromium } = require('playwright');
+
+const CHAT_URL = 'https://m365.cloud.microsoft/chat';
+
+// Discovered by asking the DOM, not by guessing. Match on role and
+// contenteditable, which do not change with UI language.
+const COMPOSER_SELECTORS = [
+  '[role="textbox"][contenteditable="true"]',
+  '[contenteditable="true"][aria-label*="Copilot"]',
+  'textarea',
+  '[contenteditable="true"]',
+];
+
+// The picker button's accessible name is localized ("Modellvelger" in Norwegian);
+// its inner text is the current selection.
+const PICKER_SELECTORS = [
+  '[aria-label*="odellvelger"]',
+  '[aria-label*="odel"]',
+  'button[aria-haspopup]',
+];
+
+const TONES = {
+  Magic: { label: 'Auto', title: 'Auto', ownedBy: 'microsoft' },
+  Chat: { label: 'Quick response', title: 'Quick response', ownedBy: 'microsoft' },
+  Reasoning: { label: 'Think deeper', title: 'Think deeper', ownedBy: 'microsoft' },
+  Gpt_5_6_Reasoning: {
+    label: 'GPT 5.6 Think deeper',
+    title: 'GPT 5.6 Think deeper',
+    ownedBy: 'openai',
+  },
+  Gpt_5_5_Chat: {
+    label: 'GPT 5.5 Quick response',
+    title: 'GPT 5.5 Quick response',
+    ownedBy: 'openai',
+  },
+};
+// What a *fresh Copilot conversation* is actually on. Not a preference: it is
+// the browser's real state, and the driver compares against it to decide whether
+// the picker needs touching. Conflating this with the requested default makes
+// the driver skip the picker and quietly answer as Auto.
+const BROWSER_DEFAULT_TONE = 'Magic';
+
+/**
+ * The newest named GPT, computed rather than hardcoded.
+ *
+ * The menu is a moving target -- `Gpt_5_4_Reasoning` was in this tenant's chat
+ * history but had already been dropped from the picker. Deriving the default
+ * means the day Microsoft ships 5.7, it becomes the default without an edit.
+ * Reasoning wins over Chat at the same version: "Think deeper" is the point.
+ */
+function highestGptTone(tones = TONES) {
+  const parse = (id) => {
+    const m = /^Gpt_(\d+)_(\d+)_(\w+)$/i.exec(id);
+    return m && { major: +m[1], minor: +m[2], reasoning: /reasoning/i.test(m[3]) };
+  };
+  let best = null;
+  let bestId = null;
+  for (const id of Object.keys(tones)) {
+    const v = parse(id);
+    if (!v) continue;
+    let better;
+    if (!best) better = true;
+    else if (v.major !== best.major) better = v.major > best.major;
+    else if (v.minor !== best.minor) better = v.minor > best.minor;
+    else better = v.reasoning && !best.reasoning;
+    if (better) { best = v; bestId = id; }
+  }
+  return bestId || BROWSER_DEFAULT_TONE;
+}
+
+// What we ask for when the caller does not specify.
+const DEFAULT_TONE = highestGptTone();
+
+// Bot messages that are progress chatter rather than the answer. The real reply
+// arrives with no messageType at all and contentOrigin "DeepLeo".
+const PROGRESS_TYPES = new Set([
+  'Progress', 'InternalLoaderMessage', 'InternalSearchQuery', 'InternalSearchResult',
+  'RenderCardRequest', 'SearchQuery', 'GeneratedCode', 'Disengaged',
+]);
+
+// Copilot marks citations two ways: [^1^] in hiddenText, and Unicode
+// private-use sentinels in the streamed text -- U+E200 opens, U+E202 separates,
+// U+E201 closes. Those code points have no glyph, so leaving them in renders a
+// row of tofu boxes. Escapes are spelled out; the literal characters are
+// invisible in an editor and get lost in edits.
+const CITATION_RE = new RegExp(
+  '\\uE200[\\s\\S]*?\\uE201'   // a complete sentinel-wrapped citation span
+  + '|\\uE200[^\\uE201]*$'      // an unterminated span at the end of a delta
+  + '|\\[\\^\\d+\\^\\]'          // the Bing-style marker used in hiddenText
+  + '|[\\uE200-\\uE20F]',       // any stray sentinel that escaped the above
+  'g',
+);
+
+const RECORD_SEPARATOR = '\u001E';
+const SOCKETIO_PREFIX = /^\d+:\d*\+?::?/;
+
+// ImageSanitizerBingAI rejects trivially small files with InvalidRequest.
+const MIN_IMAGE_BYTES = 1024;
+const EXT_FOR_MIME = {
+  'image/png': '.png', 'image/jpeg': '.jpg', 'image/jpg': '.jpg',
+  'image/webp': '.webp', 'image/gif': '.gif',
+};
+
+const isChathub = (u) => /chathub/i.test(u) || (/substrate/i.test(u) && /copilot/i.test(u));
+const isUpload = (u) => /uploadfile/i.test(u);
+
+function splitRecords(payload) {
+  return payload
+    .split(RECORD_SEPARATOR)
+    .filter((p) => p.trim())
+    .map((p) => {
+      const stripped = p.replace(SOCKETIO_PREFIX, '');
+      return stripped.trim() ? stripped : p;
+    });
+}
+
+/** Minimal pushable async queue: the bridge from events to `for await`. */
+class EventQueue {
+  constructor() { this.items = []; this.waiters = []; }
+  push(item) {
+    const w = this.waiters.shift();
+    if (w) w(item); else this.items.push(item);
+  }
+  clear() { this.items.length = 0; }
+  next(timeoutMs) {
+    if (this.items.length) return Promise.resolve(this.items.shift());
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        const i = this.waiters.indexOf(fn);
+        if (i >= 0) this.waiters.splice(i, 1);
+        resolve(null);
+      }, timeoutMs);
+      const fn = (item) => { clearTimeout(timer); resolve(item); };
+      this.waiters.push(fn);
+    });
+  }
+}
+
+class CopilotDriver {
+  constructor({ headless = false, profileDir, url = CHAT_URL } = {}) {
+    this.headless = headless;
+    this.profileDir = profileDir || path.join(__dirname, '..', '.profile');
+    this.url = url;
+    this.currentTone = BROWSER_DEFAULT_TONE;   // what a fresh conversation is on
+    this.socketUrl = null;
+    this.ready = false;
+    this._events = new EventQueue();
+    this._uploads = new EventQueue();
+    this._busy = Promise.resolve();          // serialises turns
+    this._tmpdir = null;
+  }
+
+  /**
+   * @param {object}  [opts]
+   * @param {number}  [opts.signInTimeoutMs] How long to wait for a composer.
+   *   Deliberately generous: if the profile holds no session the user signs in
+   *   *here*, and an Entra login with an Authenticator push is not a 60-second
+   *   operation. An earlier version waited one minute and then tore the browser
+   *   down mid-login, which is a spectacularly unhelpful thing to do.
+   * @param {function} [opts.onWait] Called with seconds waited, so a caller can
+   *   say something rather than appear hung.
+   */
+  async start({ signInTimeoutMs = 12 * 60 * 1000, onWait = null } = {}) {
+    this.context = await chromium.launchPersistentContext(this.profileDir, {
+      headless: this.headless,
+      viewport: { width: 1500, height: 950 },
+      args: ['--disable-blink-features=AutomationControlled'],
+    });
+    this.page = this.context.pages()[0] || (await this.context.newPage());
+    this._attach(this.page);
+    this.context.on('page', (p) => this._attach(p));
+
+    await this.page.goto(this.url, { waitUntil: 'domcontentloaded' });
+    const composer = await this._waitComposer(Math.ceil(signInTimeoutMs / 500), onWait);
+    if (!composer) {
+      throw new Error(
+        `No composer after ${Math.round(signInTimeoutMs / 1000)}s. If a sign-in page ` +
+        'is showing, finish it and start again -- the profile keeps the session.',
+      );
+    }
+    await this.page.waitForTimeout(2000);
+    this._tmpdir = await fs.mkdtemp(path.join(os.tmpdir(), 'copilot-wire-'));
+    this.ready = true;
+    return this;
+  }
+
+  _attach(page) {
+    page.on('websocket', (ws) => {
+      if (!isChathub(ws.url())) return;
+      this.socketUrl = ws.url().replace(/([?&]access_token=)[^&]*/i, '$1<REDACTED>');
+      ws.on('framereceived', (data) => this._onFrame(data.payload));
+    });
+
+    page.on('response', async (res) => {
+      if (!isUpload(res.url())) return;
+      try {
+        const body = await res.json();
+        const result = body.result || {};
+        if (result.value === 'Success') {
+          this._uploads.push({ ok: true, detail: body.fileName || 'uploaded' });
+        } else {
+          this._uploads.push({
+            ok: false,
+            detail: `${result.value}: ${result.message} (sanitizer=${body.fileSanitizer})`,
+          });
+        }
+      } catch {
+        this._uploads.push({ ok: false, detail: `HTTP ${res.status()}, unreadable body` });
+      }
+    });
+  }
+
+  _onFrame(payload) {
+    if (typeof payload !== 'string') return;
+    for (const record of splitRecords(payload)) {
+      let parsed;
+      try { parsed = JSON.parse(record); } catch { continue; }
+      if (!parsed || typeof parsed !== 'object') continue;
+
+      if (parsed.type === 1) {
+        for (const arg of parsed.arguments || []) this._harvest(arg && arg.messages);
+      } else if (parsed.type === 2) {
+        const item = parsed.item || {};
+        this._harvest(item.messages);
+        const result = item.result || {};
+        if (result.value && result.value !== 'Success') {
+          this._events.push({ kind: 'error', value: `${result.value}: ${result.message}` });
+        }
+        this._events.push({ kind: 'done' });
+      } else if (parsed.type === 3) {
+        this._events.push({ kind: 'done' });
+      }
+    }
+  }
+
+  _harvest(messages) {
+    if (!Array.isArray(messages)) return;
+    for (const m of messages) {
+      if (!m || m.author !== 'bot' || typeof m.text !== 'string' || !m.text) continue;
+      if (PROGRESS_TYPES.has(m.messageType)) {
+        this._events.push({ kind: 'progress', value: m.text });
+      } else if (m.messageType == null || m.messageType === 'Chat') {
+        this._events.push({ kind: 'text', id: m.messageId || 'answer', value: m.text });
+      }
+    }
+  }
+
+  async _findComposer() {
+    for (const sel of COMPOSER_SELECTORS) {
+      const el = this.page.locator(sel).first();
+      try {
+        if ((await el.count()) && (await el.isVisible())) return el;
+      } catch { /* keep looking */ }
+    }
+    return null;
+  }
+
+  async _waitComposer(attempts = 120, onWait = null) {
+    for (let i = 0; i < attempts; i++) {
+      const c = await this._findComposer();
+      if (c) return c;
+      if (onWait && i > 0 && i % 20 === 0) onWait(Math.round(i / 2));
+      await this.page.waitForTimeout(500);
+    }
+    return null;
+  }
+
+  async _selectTone(tone) {
+    const wanted = (TONES[tone] || {}).label;
+    if (!wanted) return false;
+
+    let trigger = null;
+    for (const sel of PICKER_SELECTORS) {
+      const el = this.page.locator(sel).first();
+      try {
+        if ((await el.count()) && (await el.isVisible())) { trigger = el; break; }
+      } catch { /* keep looking */ }
+    }
+    if (!trigger) return false;
+
+    await trigger.click({ timeout: 5000 });
+    await this.page.waitForTimeout(2500);   // the menu takes well over a second
+
+    const items = async () => {
+      const out = [];
+      for (const role of ['menuitemradio', 'menuitem', 'option']) {
+        let all = [];
+        try { all = await this.page.getByRole(role).all(); } catch { continue; }
+        for (const it of all) {
+          try {
+            if (await it.isVisible()) {
+              out.push({ it, role, text: ((await it.innerText()) || '').split(/\s+/).join(' ') });
+            }
+          } catch { /* skip */ }
+        }
+      }
+      return out;
+    };
+
+    const clickMatch = async (list) => {
+      for (const { it, text } of list) {
+        if (text.toLowerCase().includes(wanted.toLowerCase())) {
+          try {
+            await it.click({ timeout: 5000 });
+            await this.page.waitForTimeout(900);
+            return true;
+          } catch { /* try the next */ }
+        }
+      }
+      return false;
+    };
+
+    const top = await items();
+    if (await clickMatch(top)) return true;
+
+    // Named models sit behind a provider submenu that opens on HOVER.
+    // Clicking the parent collapses it and loses the nested entries.
+    for (const { it, role, text } of top) {
+      if (role !== 'menuitem') continue;
+      if (!/gpt|openai/i.test(text)) continue;
+      try {
+        await it.hover();
+        await this.page.waitForTimeout(2200);
+      } catch { continue; }
+      if (await clickMatch(await items())) return true;
+    }
+
+    try { await this.page.keyboard.press('Escape'); } catch { /* ignore */ }
+    return false;
+  }
+
+  /**
+   * Attach images through Copilot's own file input.
+   *
+   * Deliberately not a hand-rolled POST to /m365Copilot/UploadFile: handing the
+   * file to the page means the app builds the multipart body, supplies the
+   * conversationId and the gptv optionsSets, and carries its own auth.
+   */
+  async _attachImages(dataUris, emit) {
+    const paths = [];
+    for (const uri of dataUris) {
+      const m = /^data:([\w.+/-]+);base64,(.+)$/s.exec(String(uri).trim());
+      if (!m) { emit({ kind: 'progress', value: '[skipped an attachment: not a base64 data: URI]\n' }); continue; }
+      const buf = Buffer.from(m[2], 'base64');
+      if (buf.length < MIN_IMAGE_BYTES) {
+        emit({ kind: 'progress', value:
+          `[skipped an attachment: ${buf.length} bytes is below the sanitizer's floor]\n` });
+        continue;
+      }
+      const file = path.join(this._tmpdir,
+        `upload-${Date.now()}-${paths.length}${EXT_FOR_MIME[m[1].toLowerCase()] || '.png'}`);
+      await fs.writeFile(file, buf);
+      paths.push(file);
+    }
+    if (!paths.length) return;
+
+    const input = this.page.locator('input[type="file"]').first();
+    if (!(await input.count())) {
+      emit({ kind: 'progress', value: '[no file input on the page; attachment dropped]\n' });
+      return;
+    }
+    this._uploads.clear();
+    await input.setInputFiles(paths);
+
+    // Wait for one settle signal per file rather than sleeping and hoping.
+    for (let i = 0; i < paths.length; i++) {
+      const res = await this._uploads.next(90_000);
+      if (!res) emit({ kind: 'progress', value: '[upload did not settle in 90s]\n' });
+      else if (res.ok) emit({ kind: 'progress', value: `[attached ${res.detail}]\n` });
+      else emit({ kind: 'progress', value: `[upload rejected: ${res.detail}]\n` });
+    }
+    await this.page.waitForTimeout(1200);
+  }
+
+  /**
+   * Send one prompt; yield {kind: 'text'|'reasoning', value} as it arrives.
+   *
+   * Copilot re-sends the whole message body as it grows rather than emitting
+   * pure deltas, so the longest prefix per message id is tracked and only the
+   * new tail is yielded.
+   */
+  async *prompt(text, { tone = DEFAULT_TONE, images = [], timeoutMs = 300_000 } = {}) {
+    // Serialise turns: one browser, one conversation.
+    let release;
+    const mine = new Promise((r) => { release = r; });
+    const previous = this._busy;
+    this._busy = this._busy.then(() => mine);
+    await previous;
+
+    const pending = [];
+    const emit = (e) => pending.push(e);
+
+    try {
+      this._events.clear();
+
+      // tone is per conversation, so a change needs a fresh chat.
+      if (tone !== this.currentTone) {
+        await this.page.goto(this.url, { waitUntil: 'domcontentloaded' });
+        if (!(await this._waitComposer())) throw new Error('composer lost after reload');
+        await this.page.waitForTimeout(2500);
+        if (await this._selectTone(tone)) {
+          this.currentTone = tone;
+        } else {
+          emit({ kind: 'progress', value: `[could not select ${tone}; using current]\n` });
+          this.currentTone = BROWSER_DEFAULT_TONE;   // what a fresh conversation is on
+        }
+      }
+
+      if (images.length) await this._attachImages(images, emit);
+
+      for (const e of pending.splice(0)) {
+        yield { kind: e.kind === 'progress' ? 'reasoning' : e.kind, value: e.value };
+      }
+
+      const composer = await this._findComposer();
+      if (!composer) throw new Error('composer vanished');
+      await composer.click();
+      try { await composer.fill(''); } catch {
+        await this.page.keyboard.press('Control+A');
+        await this.page.keyboard.press('Delete');
+      }
+      await composer.type(text, { delay: 8 });
+      await this.page.keyboard.press('Enter');
+
+      const deadline = Date.now() + timeoutMs;
+      const emitted = new Map();
+      const seenProgress = new Set();
+      let gotAnswer = false;
+
+      for (;;) {
+        const left = deadline - Date.now();
+        if (left <= 0) throw new Error('no completion frame before timeout');
+        const ev = await this._events.next(Math.min(left, 1000));
+        if (!ev) continue;
+
+        if (ev.kind === 'text') {
+          const full = ev.value.replace(CITATION_RE, '');
+          const prev = emitted.get(ev.id) || '';
+          const tail = full.startsWith(prev) ? full.slice(prev.length) : full;
+          if (tail) {
+            emitted.set(ev.id, full);
+            gotAnswer = true;
+            yield { kind: 'text', value: tail };
+          }
+        } else if (ev.kind === 'progress') {
+          if (!seenProgress.has(ev.value)) {
+            seenProgress.add(ev.value);
+            yield { kind: 'reasoning', value: `${ev.value}\n` };
+          }
+        } else if (ev.kind === 'error') {
+          if (!gotAnswer) throw new Error(`driver error: ${ev.value}`);
+        } else if (ev.kind === 'done') {
+          return;
+        }
+      }
+    } finally {
+      release();
+    }
+  }
+
+  async close() {
+    try { await this.context?.close(); } catch { /* already gone */ }
+  }
+}
+
+module.exports = { CopilotDriver, TONES, DEFAULT_TONE, BROWSER_DEFAULT_TONE, highestGptTone, CITATION_RE, splitRecords, isChathub, isUpload };

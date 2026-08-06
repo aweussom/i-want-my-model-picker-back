@@ -74,7 +74,35 @@ TONES: dict[str, dict[str, str]] = {
         "owned_by": "openai",
     },
 }
-DEFAULT_TONE = "Magic"
+# What a *fresh Copilot conversation* is actually on. Not a preference: it is the
+# browser's real state, and the driver compares against it to decide whether the
+# picker needs touching. Conflating this with the requested default makes the
+# driver skip the picker and quietly answer as Auto.
+BROWSER_DEFAULT_TONE = "Magic"
+
+
+def highest_gpt_tone(tones: dict = TONES) -> str:
+    """The newest named GPT, computed rather than hardcoded.
+
+    The menu is a moving target -- Gpt_5_4_Reasoning was still in this tenant's
+    chat history but had already been dropped from the picker. Deriving the
+    default means the day Microsoft ships 5.7 it becomes the default with no
+    edit. Reasoning beats Chat at the same version: "Think deeper" is the point.
+    """
+    best_key = None
+    best = None
+    for tone in tones:
+        m = re.match(r"^Gpt_(\d+)_(\d+)_(\w+)$", tone, re.IGNORECASE)
+        if not m:
+            continue
+        cand = (int(m.group(1)), int(m.group(2)), "reasoning" in m.group(3).lower())
+        if best is None or cand > best:
+            best, best_key = cand, tone
+    return best_key or BROWSER_DEFAULT_TONE
+
+
+# What we ask for when the caller does not specify.
+DEFAULT_TONE = highest_gpt_tone()
 
 # Bot messages that are progress chatter rather than the answer. The real reply
 # arrives with no messageType at all and contentOrigin "DeepLeo".
@@ -143,7 +171,7 @@ class CopilotDriver:
         self._ready = threading.Event()
         self._error: BaseException | None = None
         self._socket_url: str | None = None
-        self._current_tone: str = DEFAULT_TONE
+        self._current_tone: str = BROWSER_DEFAULT_TONE
         self._cancel_requested = False
         self._uploads: queue.Queue = queue.Queue()
         self._tmpdir = Path(tempfile.mkdtemp(prefix="copilot-wire-"))
@@ -450,7 +478,7 @@ class CopilotDriver:
                             self._events.put(
                                 ("progress", f"[could not select {tone}; using current]\n")
                             )
-                            self._current_tone = DEFAULT_TONE
+                            self._current_tone = BROWSER_DEFAULT_TONE
 
                     if images:
                         self._attach_images(page, images)

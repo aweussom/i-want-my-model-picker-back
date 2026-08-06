@@ -19,3 +19,8 @@ devto-post.md
 # Launcher artefacts
 .appwindow/
 logs/
+
+# Node
+node_modules/
+electron/dist/
+package-lock.json

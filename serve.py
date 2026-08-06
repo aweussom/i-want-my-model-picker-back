@@ -157,14 +157,16 @@ def models() -> Response:
     return jsonify(
         {
             "object": "list",
+            # Default first: the UI populates its dropdown in this order and
+            # the browser selects option zero, so ordering *is* the default.
             "data": [
                 {
                     "id": tone,
                     "object": "model",
-                    "owned_by": meta["owned_by"],
-                    "description": meta["title"],
+                    "owned_by": TONES[tone]["owned_by"],
+                    "description": TONES[tone]["title"],
                 }
-                for tone, meta in TONES.items()
+                for tone in sorted(TONES, key=lambda t: t != DEFAULT_TONE)
             ],
         }
     )
