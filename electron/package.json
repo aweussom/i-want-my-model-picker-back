@@ -9,12 +9,53 @@
     "driver-test": "node src/driver-test.js",
     "serve": "node src/server.js",
     "start": "electron .",
-    "signin": "node src/signin.js"
+    "signin": "node src/signin.js",
+    "dist": "electron-builder --win",
+    "pack": "electron-builder --win --dir"
   },
   "dependencies": {
     "playwright": "^1.62.1"
   },
   "devDependencies": {
-    "electron": "^43.3.0"
+    "electron": "^43.3.0",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.aweussom.modelpicker",
+    "productName": "i want my model picker back",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "package.json",
+      "!**/*.spec.js"
+    ],
+    "extraResources": [
+      {
+        "from": "../templates",
+        "to": "web/templates"
+      },
+      {
+        "from": "../static",
+        "to": "web/static"
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "artifactName": "model-picker-${version}-setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false
+    },
+    "asarUnpack": [
+      "**/node_modules/playwright/**",
+      "**/node_modules/playwright-core/**"
+    ]
   }
 }

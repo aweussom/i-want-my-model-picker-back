@@ -60,7 +60,44 @@ The app, and the Playwright browser holding the Copilot session. That is
 inherent: the session is what makes any of this work, and `headless` only works
 once a profile is already warm. Closing the app takes the browser with it.
 
+## Building a .exe
+
+```powershell
+npm run dist     # dist/model-picker-0.1.0-setup.exe, NSIS installer, ~98 MB
+npm run pack     # dist/win-unpacked/, no installer, for testing
+```
+
+Verified: the packaged build serves the UI from its own resources, defaults to
+`Gpt_5_6_Reasoning`, and answers.
+
+Three things the first packaged build got wrong, all worth knowing if you package
+something like this yourself:
+
+**The UI lives outside the app directory.** `../templates` and `../static` are not
+part of `electron/`, so electron-builder packaged an app with no interface.
+Fixed with `extraResources`, and `server.js` now probes candidate roots instead of
+assuming one — which also keeps it runnable outside Electron.
+
+**`__dirname` is inside `app.asar`.** The default profile path resolved to a
+location inside a read-only archive, so the browser started and silently
+persisted nothing. Packaged builds now use `app.getPath('userData')`.
+
+**Playwright's Chromium is not bundled.** It lives in `%LOCALAPPDATA%\ms-playwright`
+and gets there via `playwright install`, which nobody running an installer has
+done. So the driver now prefers a browser the machine already has — Chrome, then
+Edge, then the bundled Chromium. Edge is always present on Windows 11, so a clean
+box needs no 150 MB download. `COPILOT_CHANNEL=chrome|msedge` pins it;
+`COPILOT_PROFILE` picks the profile directory.
+
+### Caveats
+
+The installer is **unsigned**, so SmartScreen will object. Signing needs a
+certificate this project does not have.
+
+First run on a clean machine needs an interactive sign-in, which happens in the
+browser window the app opens. The loading screen reports how long it has been
+waiting and tells you to look at the other window.
+
 ## Not done yet
 
-Packaging (`electron-builder`), `/v1/cancel` wired through to the page, and
-multi-image upload — see `../TODO.md`.
+`/v1/cancel` wired through to the page, and multi-image upload — see `../TODO.md`.

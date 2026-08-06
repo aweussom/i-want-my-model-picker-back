@@ -20,8 +20,18 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { TONES, DEFAULT_TONE } = require('./driver.js');
 
-// The Python project's UI, reused verbatim rather than forked again.
-const WEB_ROOT = path.join(__dirname, '..', '..');
+// The Python project's UI, reused verbatim rather than forked again. In a dev
+// checkout it lives two directories up; in a packaged build electron-builder
+// copies it into resources/. Probe rather than branch on app.isPackaged, so this
+// module stays runnable outside Electron (npm run serve) and has no electron
+// import at all.
+const WEB_ROOT = [
+  path.join(__dirname, '..', '..'),                    // dev checkout
+  process.resourcesPath ? path.join(process.resourcesPath, 'web') : null,
+  path.join(__dirname, '..', 'web'),                   // copied next to the app
+].filter(Boolean).find((root) => fs.existsSync(path.join(root, 'templates', 'index.html')))
+  || path.join(__dirname, '..', '..');
+
 const INDEX_HTML = path.join(WEB_ROOT, 'templates', 'index.html');
 const STATIC_DIR = path.join(WEB_ROOT, 'static');
 

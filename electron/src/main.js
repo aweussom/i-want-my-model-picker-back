@@ -19,9 +19,20 @@ const { app, BrowserWindow, dialog, shell } = require('electron');
 const { CopilotDriver } = require('./driver.js');
 const { createServer } = require('./server.js');
 
+/**
+ * Where the browser profile lives.
+ *
+ * In a dev checkout, next to the source. In a packaged build, __dirname is
+ * *inside app.asar*, which is a read-only archive -- defaulting there gives you
+ * a browser silently failing to persist anything, which is exactly what the
+ * first packaged build did. userData is the writable per-user location Electron
+ * exists to provide.
+ */
 const PROFILE_DIR = process.env.COPILOT_PROFILE
   ? path.resolve(process.env.COPILOT_PROFILE)
-  : path.join(__dirname, '..', '.profile');
+  : app.isPackaged
+    ? path.join(app.getPath('userData'), 'browser-profile')
+    : path.join(__dirname, '..', '.profile');
 
 let driver = null;
 let server = null;
@@ -47,15 +58,6 @@ const LOADING = `data:text/html,${encodeURIComponent(`
     <div style="font-size:15px;color:#8ab4f8">starting the browser session…</div>
     <div id="s" style="margin-top:10px;opacity:.6">this takes a few seconds</div>
   </div>
-  <script>
-    let n = 0;
-    setInterval(() => {
-      n += 1;
-      document.getElementById('s').textContent =
-        n < 20 ? 'this takes a few seconds'
-               : 'still going — if a sign-in page is showing, finish it there';
-    }, 1000);
-  </script>
 </body></html>`)}`;
 
 async function boot() {
@@ -76,8 +78,27 @@ async function boot() {
   });
 
   try {
-    driver = new CopilotDriver({ profileDir: PROFILE_DIR });
-    await driver.start({ signInTimeoutMs: 12 * 60 * 1000 });
+    console.log(`profile: ${PROFILE_DIR}`);
+    driver = new CopilotDriver({
+      profileDir: PROFILE_DIR,
+      // COPILOT_CHANNEL=chrome|msedge pins the browser; unset tries each in turn.
+      channel: process.env.COPILOT_CHANNEL || null,
+    });
+    await driver.start({
+      signInTimeoutMs: 12 * 60 * 1000,
+      // Say something rather than leave the loading screen looking hung: a
+      // first run on a clean machine genuinely requires an interactive login.
+      onWait: (s) => {
+        if (!win || win.isDestroyed()) return;
+        const msg = s < 20
+          ? `starting… ${s}s`
+          : `waiting ${s}s — if a sign-in page is showing, finish it in the other window`;
+        win.webContents.executeJavaScript(
+          `{ const e = document.getElementById('s'); if (e) e.textContent = ${JSON.stringify(msg)}; }`,
+        ).catch(() => {});
+      },
+    });
+    console.log(`browser: ${driver.usingChannel}`);
 
     const port = await freePort();
     server = createServer(driver);

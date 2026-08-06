@@ -161,10 +161,12 @@ class EventQueue {
 }
 
 class CopilotDriver {
-  constructor({ headless = false, profileDir, url = CHAT_URL } = {}) {
+  constructor({ headless = false, profileDir, url = CHAT_URL, channel = null } = {}) {
     this.headless = headless;
     this.profileDir = profileDir || path.join(__dirname, '..', '.profile');
     this.url = url;
+    this.channel = channel;          // null = try chrome, then msedge, then bundled
+    this.usingChannel = null;
     this.currentTone = BROWSER_DEFAULT_TONE;   // what a fresh conversation is on
     this.socketUrl = null;
     this.ready = false;
@@ -185,11 +187,7 @@ class CopilotDriver {
    *   say something rather than appear hung.
    */
   async start({ signInTimeoutMs = 12 * 60 * 1000, onWait = null } = {}) {
-    this.context = await chromium.launchPersistentContext(this.profileDir, {
-      headless: this.headless,
-      viewport: { width: 1500, height: 950 },
-      args: ['--disable-blink-features=AutomationControlled'],
-    });
+    this.context = await this._launch();
     this.page = this.context.pages()[0] || (await this.context.newPage());
     this._attach(this.page);
     this.context.on('page', (p) => this._attach(p));
@@ -206,6 +204,42 @@ class CopilotDriver {
     this._tmpdir = await fs.mkdtemp(path.join(os.tmpdir(), 'copilot-wire-'));
     this.ready = true;
     return this;
+  }
+
+  /**
+   * Launch a browser, preferring one the machine already has.
+   *
+   * A packaged build cannot assume Playwright's own Chromium: it lives in
+   * %LOCALAPPDATA%\ms-playwright and is put there by `playwright install`, which
+   * an installer user never runs. Driving installed Chrome or Edge instead means
+   * the .exe works on a clean Windows box with no 150MB browser download, and
+   * Edge is always present. Falls back to the bundled Chromium for dev checkouts.
+   */
+  async _launch() {
+    const opts = {
+      headless: this.headless,
+      viewport: { width: 1500, height: 950 },
+      args: ['--disable-blink-features=AutomationControlled'],
+    };
+    const attempts = this.channel
+      ? [this.channel]
+      : ['chrome', 'msedge', null];   // null = Playwright's own Chromium
+    let lastErr = null;
+    for (const channel of attempts) {
+      try {
+        const ctx = await chromium.launchPersistentContext(
+          this.profileDir, channel ? { ...opts, channel } : opts,
+        );
+        this.usingChannel = channel || 'bundled-chromium';
+        return ctx;
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    throw new Error(
+      `No usable browser. Tried ${attempts.map((a) => a || 'bundled chromium').join(', ')}. `
+      + `Last error: ${lastErr && lastErr.message}`,
+    );
   }
 
   _attach(page) {
