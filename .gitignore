@@ -15,3 +15,7 @@ __pycache__/
 
 # Article draft: kept locally, not published here.
 devto-post.md
+
+# Launcher artefacts
+.appwindow/
+logs/

@@ -139,37 +139,40 @@ function renderMarkdown(text, isStreaming) {
     const thinkOpen = !thinkMatch && text.match(/^<think>([\s\S]*)$/);
     const thinkStarting = !thinkMatch && !thinkOpen && /^<(?:t(?:h(?:i(?:n(?:k)?)?)?)?)?$/.test(text.trim());
 
+    // Only offer "click to expand" when expanding would actually reveal
+    // something. Copilot's reasoning here is progress chatter -- often a single
+    // line like "Looking into it..." -- so a preview of the last N lines can be
+    // identical to the full text. The click then toggles a class that changes
+    // nothing visible, which reads as a broken control.
+    const thinkBlock = (content, streaming, previewLines) => {
+        const lines = content.split('\n');
+        const br = (s) => escapeHtml(s).replace(/\n/g, '<br>');
+        const streamCls = streaming ? ' streaming' : '';
+        if (lines.length <= previewLines) {
+            return `<div class="think-block${streamCls}">
+                <div class="think-header">Thinking...</div>
+                <div class="think-full">${br(content)}</div>
+            </div>`;
+        }
+        const preview = lines.slice(-previewLines).join('\n');
+        const cls = thinkExpanded ? '' : ' collapsed';
+        return `<div class="think-block${streamCls}${cls}" data-think-toggle>
+            <div class="think-header">Thinking... <span class="think-toggle">(click to expand)</span></div>
+            <div class="think-full">${br(content)}</div>
+            <div class="think-preview">${br(preview)}</div>
+        </div>`;
+    };
+
     if (thinkMatch) {
         const thinkContent = thinkMatch[1].trim();
         mainText = thinkMatch[2].trim();
         if (thinkContent) {
-            const lines = thinkContent.split('\n');
-            const preview = lines.slice(-3).join('\n');
-            const cls = thinkExpanded ? '' : 'collapsed';
-            thinkHtml = `<div class="think-block ${cls}" data-think-toggle>
-                <div class="think-header">Thinking... <span class="think-toggle">(click to expand)</span></div>
-                <div class="think-full">${escapeHtml(thinkContent).replace(/\n/g, '<br>')}</div>
-                <div class="think-preview">${escapeHtml(preview).replace(/\n/g, '<br>')}</div>
-            </div>`;
+            thinkHtml = thinkBlock(thinkContent, false, 3);
         }
     } else if (thinkOpen) {
         const thinkContent = thinkOpen[1].trim();
         if (thinkContent) {
-            const lines = thinkContent.split('\n');
-            if (lines.length > 4) {
-                const preview = lines.slice(-4).join('\n');
-                const cls = thinkExpanded ? '' : 'collapsed';
-                thinkHtml = `<div class="think-block streaming ${cls}" data-think-toggle>
-                    <div class="think-header">Thinking... <span class="think-toggle">(click to expand)</span></div>
-                    <div class="think-full">${escapeHtml(thinkContent).replace(/\n/g, '<br>')}</div>
-                    <div class="think-preview">${escapeHtml(preview).replace(/\n/g, '<br>')}</div>
-                </div>`;
-            } else {
-                thinkHtml = `<div class="think-block streaming">
-                    <div class="think-header">Thinking...</div>
-                    <div class="think-preview">${escapeHtml(thinkContent).replace(/\n/g, '<br>')}</div>
-                </div>`;
-            }
+            thinkHtml = thinkBlock(thinkContent, true, 4);
         } else {
             thinkHtml = `<div class="think-block streaming"><div class="think-header">Thinking...</div></div>`;
         }

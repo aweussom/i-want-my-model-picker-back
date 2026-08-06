@@ -44,7 +44,22 @@ Use a separate profile per account — keep work and personal apart:
 .\.venv\Scripts\python.exe capture.py --label signin --profile .profile-personal --seconds 300
 ```
 
-**2. Start the server.**
+**2. Run it as an app.** `app.bat` starts the server, waits for it to actually be
+ready, and opens the UI in a Chromium `--app` window — no address bar, no tabs,
+its own taskbar entry. Closing the window shuts the server down.
+
+```powershell
+.\app.bat                              # or double-click it
+.\app.bat -KeepServer                  # leave the server up afterwards
+.\app.bat -ProfileDir .profile-personal
+```
+
+No new dependencies: it uses whichever Chromium-family browser you already have,
+falling back Chrome → Edge → Playwright's own. Expect **two** windows — the app,
+and the Playwright browser holding the Copilot session. That is inherent to the
+design; the second one is where the work happens.
+
+Or start the server by hand:
 
 ```powershell
 .\.venv\Scripts\python.exe serve.py --port 8790

@@ -214,6 +214,9 @@ body {
     font-weight: 400;
     font-size: 11px;
     color: var(--text-dim);
+    /* Only meaningful while collapsed; shown again by the .collapsed rule
+       below. Without this it still reads "click to expand" once expanded. */
+    display: none;
 }
 .think-block .think-full {
     display: block;
