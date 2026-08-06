@@ -193,13 +193,19 @@ async function openConversation(c) {
         const result = await resp.json();
         if (!resp.ok) throw new Error((result.error && result.error.message) || 'failed');
 
-        // Copilot has the thread and its history; this window does not. Saying so
-        // is better than an empty pane that looks like the context was lost.
+        // The transcript comes back with the open call: Copilot server-side
+        // renders it into the page, so it is already there to be read.
         newChat();
-        addMessage('assistant', 'Reopened **' + (c.name || 'conversation')
-            + '**. Copilot still has its full history even though this window starts '
-            + 'empty, so you can carry on where you left off. Model: '
-            + (result.tone || 'unknown') + '.');
+        const restored = Array.isArray(result.messages) ? result.messages : [];
+        for (const m of restored) {
+            addMessage(m.role === 'user' ? 'user' : 'assistant', m.content);
+            chatHistory.push({ role: m.role, content: m.content });
+        }
+        if (!restored.length) {
+            addMessage('assistant', 'Reopened **' + (c.name || 'conversation')
+                + '**. Copilot still has the history even though it could not be read '
+                + 'back into this window. Model: ' + (result.tone || 'unknown') + '.');
+        }
         if (result.tone) {
             for (const opt of modelSelect.options) {
                 if (opt.value === result.tone) modelSelect.value = result.tone;

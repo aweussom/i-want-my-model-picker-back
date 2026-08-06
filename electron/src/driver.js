@@ -143,6 +143,12 @@ const DEFAULT_TONE = highestGptTone();
 const PROGRESS_TYPES = new Set([
   'Progress', 'InternalLoaderMessage', 'InternalSearchQuery', 'InternalSearchResult',
   'RenderCardRequest', 'SearchQuery', 'GeneratedCode', 'Disengaged',
+  // MemoryUpdate turned up while reading a stored transcript: Copilot records
+  // things it has decided to remember as a bot message ("Codeword BERGEN"). It
+  // is bookkeeping, not an answer, and without this it would have been rendered
+  // as one.
+  'MemoryUpdate', 'TriggerPlugin', 'HintInvocation', 'DeveloperLogs',
+  'ReferencesListComplete', 'EndOfRequest',
 ]);
 
 // Copilot marks citations two ways: [^1^] in hiddenText, and Unicode
@@ -270,6 +276,47 @@ class CopilotDriver {
     this.headless = false;
     this.context = await this._launch();
     return this._afterLaunch(signInTimeoutMs, onWait);
+  }
+
+  /**
+   * Read the transcript of the conversation currently loaded.
+   *
+   * There is no action that fetches this, which is why three separate traffic
+   * probes came back empty. Copilot server-side renders the history into the page
+   * when you navigate to /chat/conversation/<id>, and it lands in the React Router
+   * hydration blob under the `chat-history` loader:
+   *
+   *   window.__staticRouterHydrationData
+   *     .loaderData['chat-history'].store.rawConversationResponse.messages
+   *
+   * Each entry has the same shape as a Chathub frame message -- author, text,
+   * messageType -- so the same PROGRESS_TYPES filter applies. Note that filter
+   * has to include MemoryUpdate: Copilot logs what it chose to remember as a bot
+   * message, and it is not an answer.
+   */
+  async readTranscript() {
+    const messages = await this.page.evaluate(() => {
+      const data = window.__staticRouterHydrationData;
+      const loader = data && data.loaderData && data.loaderData['chat-history'];
+      const raw = loader && loader.store && loader.store.rawConversationResponse;
+      if (!raw || !Array.isArray(raw.messages)) return null;
+      return raw.messages.map((m) => ({
+        author: m.author || null,
+        messageType: m.messageType || null,
+        text: typeof m.text === 'string' ? m.text : '',
+        createdAt: m.createdAt || m.timestamp || null,
+      }));
+    }).catch(() => null);
+    if (!messages) return null;
+
+    return messages
+      .filter((m) => m.text && !PROGRESS_TYPES.has(m.messageType))
+      .filter((m) => m.author === 'user' || m.author === 'bot')
+      .map((m) => ({
+        role: m.author === 'user' ? 'user' : 'assistant',
+        content: m.text.replace(CITATION_RE, ''),
+        at: m.createdAt,
+      }));
   }
 
   /**
@@ -437,7 +484,10 @@ class CopilotDriver {
     this.currentTone = (await this.readCurrentTone())
       || (tone && TONES[tone] ? tone : BROWSER_DEFAULT_TONE);
     this._conversationPinned = true;
-    return { id, tone: this.currentTone, pinned: true };
+    // The transcript is in the page already; handing it back means the caller can
+    // show the thread instead of an empty pane that looks like a loss.
+    const messages = await this.readTranscript();
+    return { id, tone: this.currentTone, pinned: true, messages: messages || [] };
   }
 
   /**

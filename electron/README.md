@@ -219,3 +219,40 @@ actually opened. Four consecutive runs: 4/4.
 returned `null` for exactly the named models -- selection worked and verification
 silently disagreed, which then mis-reported the tone of a reopened conversation.
 Repeated alternating selection: 2/6 before, 6/6 after.
+
+## Where the message history actually comes from
+
+No action fetches it. Three probes went looking — action-dispatch POSTs, then
+every JSON response body and every WebSocket frame, then every *streamed* body via
+the in-page `fetch` tap — and all three came back empty. The only match on a
+needle search was the conversation **title**, which contains the prompt and is
+therefore a red herring.
+
+Copilot server-side renders the transcript into the page. It arrives in the React
+Router hydration blob:
+
+```js
+window.__staticRouterHydrationData
+  .loaderData['chat-history'].store.rawConversationResponse.messages
+```
+
+Entries have the same shape as a Chathub frame message, so the same filtering
+applies:
+
+| author | messageType | text |
+|---|---|---|
+| `user` | – | "Remember the codeword BERGEN…" |
+| `bot` | `Progress` | "Working on it…" |
+| `bot` | `MemoryUpdate` | "Codeword BERGEN" |
+| `bot` | – | "OK" |
+
+`MemoryUpdate` was a find in itself: Copilot records what it has decided to
+remember as a bot message. It is bookkeeping, not an answer, and it was **not** in
+`PROGRESS_TYPES` — so it would have been rendered as one. Added, along with
+`TriggerPlugin`, `HintInvocation`, `DeveloperLogs`, `ReferencesListComplete` and
+`EndOfRequest`, all of which appear in the invocation's `allowedMessageTypes` and
+none of which are answers.
+
+`readTranscript()` reads that path, and `openConversation()` returns the messages,
+so reopening a thread now repopulates this window rather than explaining why it is
+empty.
