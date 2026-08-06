@@ -410,18 +410,50 @@ class CopilotDriver {
    * changed shape before and a rendered list is harder to break.
    */
   async listConversations({ limit = 40 } = {}) {
+    // A captured request from the real client shows five fields, not one:
+    //   {action, syncState, enableLastMessage, conversationHistoryFilter, state}
+    //
+    // Sending only `action` returns nothing. Mirroring the other fields does not
+    // help either -- all three shapes below were tried against a live session and
+    // every one came back empty, so `syncState` (a sync cursor we have no
+    // legitimate copy of) appears to be required. Recorded as a negative result
+    // rather than deleted: the next person should not have to re-run it.
+    //
+    // Consequence: this falls through to the DOM, which yields only name and id.
+    // No tone, no preview, no timestamp, and only the conversations the sidebar
+    // has actually rendered -- so the count varies between 18 and 36 depending on
+    // how much has lazy-loaded. Worth fixing properly by capturing a real
+    // syncState, but not by pretending this works.
     const viaAction = await this.page.evaluate(async () => {
-      try {
-        const r = await fetch('/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'GetConversationPageHistoryList' }),
-        });
-        if (!r.ok) return null;
-        const j = await r.json();
-        const chats = j?.store?.conversationPageHistoryList?.chats;
-        return Array.isArray(chats) ? chats : null;
-      } catch { return null; }
+      const attempts = [
+        {
+          action: 'GetConversationPageHistoryList',
+          enableLastMessage: true,
+          conversationHistoryFilter: null,
+          state: { conversationPageHistoryList: {} },
+        },
+        {
+          action: 'GetConversationPageHistoryList',
+          enableLastMessage: true,
+          conversationHistoryFilter: null,
+        },
+        { action: 'GetConversationPageHistoryList' },
+      ];
+      for (const body of attempts) {
+        try {
+          const r = await fetch('/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          if (!r.ok) continue;
+          const j = await r.json();
+          const chats = j && j.store && j.store.conversationPageHistoryList
+            && j.store.conversationPageHistoryList.chats;
+          if (Array.isArray(chats) && chats.length) return chats;
+        } catch { /* try the next shape */ }
+      }
+      return null;
     }).catch(() => null);
 
     if (viaAction) {

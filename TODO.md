@@ -32,3 +32,17 @@
 - Non-image file uploads. `cwc_fileupload_odb` and `add_filestore_filetype` are
   in `optionsSets`, and `UploadFile` takes a `scenario` field that was
   `UploadImage` for pictures. Something else presumably goes there.
+
+- **The conversation list falls back to the DOM, so it is impoverished.**
+  `GetConversationPageHistoryList` returns nothing for every payload shape tried:
+  `{action}` alone, plus `enableLastMessage`/`conversationHistoryFilter`, plus a
+  minimal `state`. The real client also sends `syncState`, a cursor we have no
+  copy of, and that is the likely requirement. Consequences of the fallback: no
+  tone, no preview, no timestamp, and only what the sidebar has rendered -- the
+  count varies between 18 and 36 as it lazy-loads. Fix by capturing a live
+  `syncState` from a real request and mirroring it.
+
+- Testing against a real account leaves litter. `src/cleanup-tests.js` deletes it
+  (`--dry-run` first). Deletion goes through the sidebar overflow menu, whose items
+  are localised: "Gi nytt navn", "Legg til i notatblokk", "Slett". Prefer a
+  throwaway prompt you can recognise later over "hi".
