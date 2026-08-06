@@ -54,11 +54,23 @@ UI is served unchanged from `../templates` and `../static`, so it keeps talking
 fetch + SSE and needed no rewrite. The renderer could use IPC instead, but then
 the OpenAI surface would have to exist twice — and that surface is the point.
 
-## Still two windows
+## One window, once you are signed in
 
-The app, and the Playwright browser holding the Copilot session. That is
-inherent: the session is what makes any of this work, and `headless` only works
-once a profile is already warm. Closing the app takes the browser with it.
+The browser is only shown when it needs to be.
+
+`start()` probes headless first, with a short fuse. A warm profile reaches the
+composer in seconds -- measured at 8.4s, against roughly 45s when a window has to
+be drawn and waited on. Tone discovery, model switching and streaming all work
+hidden.
+
+If no composer turns up inside that fuse, a sign-in page is almost certainly
+showing, so the driver closes the hidden browser and relaunches it **visibly**
+with the long timeout. That is the case worth designing for: an invisible browser
+waiting on a login you cannot see is indistinguishable from a hang, and sessions
+expire and Conditional Access re-prompts, so it is not hypothetical.
+
+`COPILOT_HEADLESS=0` forces it visible; `=1` forbids the fallback. Closing the
+app takes the browser with it either way.
 
 ## Building a .exe
 

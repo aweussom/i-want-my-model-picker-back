@@ -35,28 +35,65 @@ const COMPOSER_SELECTORS = [
   '[contenteditable="true"]',
 ];
 
-// The picker button's accessible name is localized ("Modellvelger" in Norwegian);
-// its inner text is the current selection.
+// The picker button's accessible name is localized -- "Modellvelger" in
+// Norwegian, "Model selector" in English -- and its inner text is the current
+// selection.
+//
+// There used to be a bare `button[aria-haspopup]` as a last resort. That is far
+// too broad: it matches every popup button on the page, and on an account where
+// the real picker is absent it happily selected the overflow menu on a chat in
+// the history sidebar (aria-label="Mer", class fui-SplitNavItem__menuButton).
+// Clicking that then failed because the nav link's subtree intercepts pointer
+// events, and the exception surfaced as a chat error. A selector that can match
+// the wrong thing is worse than one that matches nothing.
 const PICKER_SELECTORS = [
-  '[aria-label*="odellvelger"]',
-  '[aria-label*="odel"]',
-  'button[aria-haspopup]',
+  '[aria-label*="odellvelger" i]',
+  '[aria-label*="model selector" i]',
+  '[aria-label*="modellvelg" i]',
 ];
 
+// The trigger's text is the current tone's label, so it doubles as confirmation
+// that we found the right button. Localised, hence the aliases below.
+const PICKER_TEXT_HINTS = [
+  'auto', 'automatisk',
+  'quick response', 'raskt svar',
+  'think deeper', 'tenk dypere',
+  'gpt',
+];
+
+// `labels` are what the menu entry reads, and Copilot localises them. This laptop
+// renders the entries in English while the surrounding chrome is Norwegian;
+// another machine on the same product renders them fully translated. Matching on
+// one language quietly finds nothing on the other, so every tone carries its
+// aliases. Add more as they turn up -- a missing alias degrades to "this account
+// does not offer that tone", which is wrong but harmless.
 const TONES = {
-  Magic: { label: 'Auto', title: 'Auto', ownedBy: 'microsoft' },
-  Chat: { label: 'Quick response', title: 'Quick response', ownedBy: 'microsoft' },
-  Reasoning: { label: 'Think deeper', title: 'Think deeper', ownedBy: 'microsoft' },
+  Magic: {
+    labels: ['Auto', 'Automatisk'],
+    title: 'Auto', ownedBy: 'microsoft',
+  },
+  Chat: {
+    labels: ['Quick response', 'Raskt svar'],
+    title: 'Quick response', ownedBy: 'microsoft',
+  },
+  Reasoning: {
+    labels: ['Think deeper', 'Tenk dypere'],
+    title: 'Think deeper', ownedBy: 'microsoft',
+  },
   Gpt_5_6_Reasoning: {
-    label: 'GPT 5.6 Think deeper',
-    title: 'GPT 5.6 Think deeper',
-    ownedBy: 'openai',
+    labels: ['GPT 5.6 Think deeper', 'GPT 5.6 Tenk dypere'],
+    title: 'GPT 5.6 Think deeper', ownedBy: 'openai',
   },
   Gpt_5_5_Chat: {
-    label: 'GPT 5.5 Quick response',
-    title: 'GPT 5.5 Quick response',
-    ownedBy: 'openai',
+    labels: ['GPT 5.5 Quick response', 'GPT 5.5 Raskt svar'],
+    title: 'GPT 5.5 Quick response', ownedBy: 'openai',
   },
+};
+
+/** Does `text` contain any of this tone's localised labels? */
+const toneMatches = (id, text) => {
+  const low = String(text).toLowerCase();
+  return (TONES[id]?.labels || []).some((l) => low.includes(l.toLowerCase()));
 };
 // What a *fresh Copilot conversation* is actually on. Not a preference: it is
 // the browser's real state, and the driver compares against it to decide whether
@@ -188,8 +225,47 @@ class CopilotDriver {
    * @param {function} [opts.onWait] Called with seconds waited, so a caller can
    *   say something rather than appear hung.
    */
-  async start({ signInTimeoutMs = 12 * 60 * 1000, onWait = null } = {}) {
+  /**
+   * Start headless when the profile already holds a session; headed when it does
+   * not.
+   *
+   * Once you have signed in, the browser window is clutter -- it is doing work,
+   * but you do not need to watch it. Hiding it unconditionally is the trap:
+   * sessions expire and Conditional Access re-prompts, and an invisible browser
+   * waiting on a login you cannot see is indistinguishable from a hang.
+   *
+   * So probe headless with a short fuse. A warm profile reaches the composer in
+   * seconds; if it does not, a sign-in page is almost certainly showing, and we
+   * relaunch visibly with the long timeout so you can deal with it. Self-healing
+   * rather than configurable, though COPILOT_HEADLESS=0 or 1 forces the matter.
+   */
+  async start({ signInTimeoutMs = 12 * 60 * 1000, onWait = null,
+    headlessProbeMs = 45 * 1000 } = {}) {
+    const forced = process.env.COPILOT_HEADLESS;
+
+    if (forced !== '0') {
+      this.headless = true;
+      this.context = await this._launch();
+      try {
+        return await this._afterLaunch(
+          forced === '1' ? signInTimeoutMs : headlessProbeMs, onWait,
+        );
+      } catch (err) {
+        if (forced === '1') throw err;
+        console.log('[driver] no composer while hidden -- showing the browser to sign in');
+        try { await this.context.close(); } catch { /* already gone */ }
+        this.ready = false;
+        this.socketUrl = null;
+        this.availableTones = null;
+      }
+    }
+
+    this.headless = false;
     this.context = await this._launch();
+    return this._afterLaunch(signInTimeoutMs, onWait);
+  }
+
+  async _afterLaunch(signInTimeoutMs, onWait) {
     this.page = this.context.pages()[0] || (await this.context.newPage());
     this._attach(this.page);
     this.context.on('page', (p) => this._attach(p));
@@ -204,7 +280,7 @@ class CopilotDriver {
     }
     await this.page.waitForTimeout(2000);
     this.availableTones = await this.discoverTones();
-    this._tmpdir = await fs.mkdtemp(path.join(os.tmpdir(), 'copilot-wire-'));
+    this._tmpdir = this._tmpdir || await fs.mkdtemp(path.join(os.tmpdir(), 'copilot-wire-'));
     this.ready = true;
     return this;
   }
@@ -351,6 +427,22 @@ class CopilotDriver {
         if ((await el.count()) && (await el.isVisible())) return el;
       } catch { /* keep looking */ }
     }
+    // Nothing matched by accessible name. Rather than reach for a generic
+    // popup button -- which is how the sidebar's overflow menu got clicked --
+    // look for a button whose visible text is a tone label, and require it to
+    // be outside the navigation. If that finds nothing, we have no picker, and
+    // saying so is the correct answer.
+    try {
+      const buttons = await this.page.locator('button:not(nav button)').all();
+      for (const b of buttons) {
+        const text = ((await b.innerText().catch(() => '')) || '')
+          .split(/\s+/).join(' ').toLowerCase();
+        if (!text || text.length > 30) continue;
+        if (PICKER_TEXT_HINTS.some((h) => text.includes(h)) && await b.isVisible()) {
+          return b;
+        }
+      }
+    } catch { /* fall through */ }
     return null;
   }
 
@@ -406,8 +498,7 @@ class CopilotDriver {
       try { await this.page.keyboard.press('Escape'); } catch { /* ignore */ }
 
       const menu = [...seen].join(' || ').toLowerCase();
-      const available = Object.keys(TONES)
-        .filter((id) => menu.includes(TONES[id].label.toLowerCase()));
+      const available = Object.keys(TONES).filter((id) => toneMatches(id, menu));
       return available.length ? available : null;
     } catch {
       try { await this.page.keyboard.press('Escape'); } catch { /* ignore */ }
@@ -429,14 +520,19 @@ class CopilotDriver {
   }
 
   async _selectTone(tone) {
-    const wanted = (TONES[tone] || {}).label;
-    if (!wanted) return false;
+    if (!TONES[tone]) return false;
     if (this.availableTones && !this.availableTones.includes(tone)) return false;
 
     const trigger = await this._findPickerTrigger();
     if (!trigger) return false;
 
-    await trigger.click({ timeout: 5000 });
+    // A failure here must not take the turn down with it: on an account with no
+    // picker at all, this is expected, and the caller degrades to the current tone.
+    try {
+      await trigger.click({ timeout: 5000 });
+    } catch {
+      return false;
+    }
     await this.page.waitForTimeout(2500);   // the menu takes well over a second
 
     const items = async () => {
@@ -457,7 +553,7 @@ class CopilotDriver {
 
     const clickMatch = async (list) => {
       for (const { it, text } of list) {
-        if (text.toLowerCase().includes(wanted.toLowerCase())) {
+        if (toneMatches(tone, text)) {
           try {
             await it.click({ timeout: 5000 });
             await this.page.waitForTimeout(900);
@@ -475,7 +571,7 @@ class CopilotDriver {
     // Clicking the parent collapses it and loses the nested entries.
     for (const { it, role, text } of top) {
       if (role !== 'menuitem') continue;
-      if (!/gpt|openai/i.test(text)) continue;
+      if (!/gpt|openai|claude|anthropic/i.test(text)) continue;
       try {
         await it.hover();
         await this.page.waitForTimeout(2200);
@@ -622,4 +718,4 @@ class CopilotDriver {
   }
 }
 
-module.exports = { CopilotDriver, TONES, DEFAULT_TONE, BROWSER_DEFAULT_TONE, highestGptTone, CITATION_RE, splitRecords, isChathub, isUpload };
+module.exports = { CopilotDriver, TONES, DEFAULT_TONE, BROWSER_DEFAULT_TONE, highestGptTone, toneMatches, CITATION_RE, splitRecords, isChathub, isUpload };

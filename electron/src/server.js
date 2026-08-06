@@ -64,7 +64,8 @@ function resolveTone(requested, fallback = DEFAULT_TONE) {
   // Accept the menu label too, and ignore any "@suffix" the UI appends.
   const bare = String(requested).split('@')[0].trim().toLowerCase();
   for (const [tone, meta] of Object.entries(TONES)) {
-    if (bare === tone.toLowerCase() || bare === meta.label.toLowerCase()) return tone;
+    if (bare === tone.toLowerCase()) return tone;
+    if ((meta.labels || []).some((l) => bare === l.toLowerCase())) return tone;
   }
   return fallback;
 }

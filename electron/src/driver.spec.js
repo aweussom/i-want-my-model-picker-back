@@ -61,8 +61,24 @@ console.log('tones');
 check('five tones, and the newest GPT is what we request by default', () => {
   assert.equal(Object.keys(TONES).length, 5);
   assert.equal(DEFAULT_TONE, 'Gpt_5_6_Reasoning');
-  assert.equal(TONES.Gpt_5_6_Reasoning.label, 'GPT 5.6 Think deeper');
+  assert.deepEqual(TONES.Gpt_5_6_Reasoning.labels,
+    ['GPT 5.6 Think deeper', 'GPT 5.6 Tenk dypere']);
 });
+
+console.log('localised label matching');
+const { toneMatches } = require('./driver.js');
+check('matches the English menu entry', () =>
+  assert.ok(toneMatches('Reasoning', 'Think deeper Think longer for better answers')));
+check('matches the Norwegian menu entry', () =>
+  assert.ok(toneMatches('Reasoning', 'Tenk dypere Tenk lenger for bedre svar')));
+check('Automatisk is Magic', () => assert.ok(toneMatches('Magic', 'Automatisk')));
+check('Raskt svar is Chat', () => assert.ok(toneMatches('Chat', 'Raskt svar')));
+check('a menu without named models does not match a GPT tone', () =>
+  assert.ok(!toneMatches('Gpt_5_6_Reasoning',
+    'Automatisk || Raskt svar || Tenk dypere')));
+check('a menu with named models does match', () =>
+  assert.ok(toneMatches('Gpt_5_6_Reasoning',
+    'Automatisk || Raskt svar || Tenk dypere || GPT 5.6 Think deeper')));
 
 
 
