@@ -101,3 +101,33 @@ waiting and tells you to look at the other window.
 ## Not done yet
 
 `/v1/cancel` wired through to the page, and multi-image upload — see `../TODO.md`.
+
+## The menu is not the same everywhere
+
+Which tones exist depends on the account, and this cost a wrong assumption.
+
+A work tenant on `licenseType=Starter` offers the three generic modes *and* named
+models — GPT 5.6 Think deeper, GPT 5.5 Quick response. A **personal Microsoft
+account offers only the generic three**: Auto, Quick response, Think deeper. No
+named models at all.
+
+Hardcoding the tone map from one tenant meant the app confidently defaulted to
+`Gpt_5_6_Reasoning` on accounts that have never had it, failed to find the menu
+entry, and silently answered as Auto. So `discoverTones()` now reads the real
+picker at startup — including hovering the provider submenu — and `/v1/models`
+lists only what the account actually offers, with that account's best available
+tone first.
+
+`GET /health` reports what was found, which is how you diagnose this from a
+machine you cannot inspect:
+
+```json
+{"status":"ready","version":"0.1.2","browser":"chrome","sandbox":true,
+ "defaultTone":"Gpt_5_6_Reasoning",
+ "availableTones":["Magic","Chat","Reasoning","Gpt_5_6_Reasoning","Gpt_5_5_Chat"],
+ "licenseType":"Starter"}
+```
+
+On an account without named models the same call reports
+`"availableTones":["Magic","Chat","Reasoning"]` and `"defaultTone":"Reasoning"`.
+Tenant and user object ids are deliberately not included.

@@ -20,6 +20,11 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { TONES, DEFAULT_TONE } = require('./driver.js');
 
+// Reported by /health so a bug report from another machine can name its build.
+const VERSION = (() => {
+  try { return require('../package.json').version; } catch { return 'unknown'; }
+})();
+
 // The Python project's UI, reused verbatim rather than forked again. In a dev
 // checkout it lives two directories up; in a packaged build electron-builder
 // copies it into resources/. Probe rather than branch on app.isPackaged, so this
@@ -44,15 +49,24 @@ const MIME = {
   '.ico': 'image/x-icon',
 };
 
-function resolveTone(requested) {
-  if (!requested) return DEFAULT_TONE;
+/**
+ * Map an OpenAI `model` value onto a tone.
+ *
+ * `fallback` is the driver's per-account default, not a module constant: which
+ * tones exist depends on the account. A work tenant offers named GPT models; a
+ * personal Microsoft account offers only Auto / Quick response / Think deeper.
+ * Falling back to a hardcoded GPT on an account that has never had one meant
+ * asking for a menu entry that is not there and quietly answering as Auto.
+ */
+function resolveTone(requested, fallback = DEFAULT_TONE) {
+  if (!requested) return fallback;
   if (TONES[requested]) return requested;
   // Accept the menu label too, and ignore any "@suffix" the UI appends.
   const bare = String(requested).split('@')[0].trim().toLowerCase();
   for (const [tone, meta] of Object.entries(TONES)) {
     if (bare === tone.toLowerCase() || bare === meta.label.toLowerCase()) return tone;
   }
-  return DEFAULT_TONE;
+  return fallback;
 }
 
 function lastUserMessage(body) {
@@ -145,20 +159,37 @@ function createServer(driver) {
     }
 
     if (route === '/health') {
+      // Enough to diagnose a report from a machine you cannot inspect: which
+      // build is running, which browser it drove, whether the sandbox is on, and
+      // what licence the account actually has. Deliberately excludes the tenant
+      // id and user object id, which the Chathub URL also carries.
+      const socket = driver && driver.socketUrl;
+      const licence = socket && /[?&]licenseType=([^&]*)/i.exec(socket);
+      const agent = socket && /[?&]agent=([^&]*)/i.exec(socket);
       return json(res, 200, {
         status: driver && driver.ready ? 'ready' : 'loading',
+        version: VERSION,
         tone: driver ? driver.currentTone : null,
-        // Report only whether the socket is attached: the URL embeds the user
-        // object id and tenant id.
-        chathub: Boolean(driver && driver.socketUrl),
+        defaultTone: driver ? driver.defaultTone : null,
+        availableTones: driver ? driver.availableTones : null,
+        browser: driver ? driver.usingChannel : null,
+        sandbox: driver ? driver.sandboxEnabled : null,
+        chathub: Boolean(socket),
+        licenseType: licence ? decodeURIComponent(licence[1]) : null,
+        agent: agent ? decodeURIComponent(agent[1]) : null,
       });
     }
 
     if (route === '/v1/models') {
       // Default first: the UI populates its dropdown in this order and the
       // browser selects option zero, so ordering *is* the default selection.
-      const ids = Object.keys(TONES)
-        .sort((a, b) => (a === DEFAULT_TONE ? -1 : b === DEFAULT_TONE ? 1 : 0));
+      // Only what this account actually offers, discovered from the real picker
+      // at startup, with the account's own default first.
+      const preferred = (driver && driver.defaultTone) || DEFAULT_TONE;
+      const offered = (driver && driver.availableTones) || Object.keys(TONES);
+      const ids = offered
+        .filter((id) => TONES[id])
+        .sort((a, b) => (a === preferred ? -1 : b === preferred ? 1 : 0));
       return json(res, 200, {
         object: 'list',
         data: ids.map((id) => ({
@@ -182,7 +213,7 @@ function createServer(driver) {
       const prompt = lastUserMessage(body);
       if (!prompt) return json(res, 400, { error: { message: 'no user message' } });
 
-      const tone = resolveTone(body.model);
+      const tone = resolveTone(body.model, (driver && driver.defaultTone) || DEFAULT_TONE);
       const { uris, skippedRemote } = extractImages(body);
       const notice = skippedRemote
         ? `[note: skipped ${skippedRemote} remote image URL(s); attach as a base64 data: URI instead]\n`

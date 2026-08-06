@@ -167,6 +167,8 @@ class CopilotDriver {
     this.url = url;
     this.channel = channel;          // null = try chrome, then msedge, then bundled
     this.usingChannel = null;
+    this.sandboxEnabled = null;
+    this.availableTones = null;   // filled by discoverTones() at startup
     this.currentTone = BROWSER_DEFAULT_TONE;   // what a fresh conversation is on
     this.socketUrl = null;
     this.ready = false;
@@ -201,6 +203,7 @@ class CopilotDriver {
       );
     }
     await this.page.waitForTimeout(2000);
+    this.availableTones = await this.discoverTones();
     this._tmpdir = await fs.mkdtemp(path.join(os.tmpdir(), 'copilot-wire-'));
     this.ready = true;
     return this;
@@ -238,6 +241,7 @@ class CopilotDriver {
           this.profileDir, channel ? { ...opts, channel } : opts,
         );
         this.usingChannel = channel || 'bundled-chromium';
+        this.sandboxEnabled = opts.chromiumSandbox === true;
         return ctx;
       } catch (err) {
         lastErr = err;
@@ -330,17 +334,96 @@ class CopilotDriver {
     return null;
   }
 
-  async _selectTone(tone) {
-    const wanted = (TONES[tone] || {}).label;
-    if (!wanted) return false;
-
-    let trigger = null;
+  async _findPickerTrigger() {
     for (const sel of PICKER_SELECTORS) {
       const el = this.page.locator(sel).first();
       try {
-        if ((await el.count()) && (await el.isVisible())) { trigger = el; break; }
+        if ((await el.count()) && (await el.isVisible())) return el;
       } catch { /* keep looking */ }
     }
+    return null;
+  }
+
+  /**
+   * Ask the page which tones this account actually offers.
+   *
+   * The menu is not the same everywhere. A work tenant on licenseType=Starter
+   * shows the generic modes *and* named models (GPT 5.6 Think deeper, GPT 5.5
+   * Quick response). A personal Microsoft account shows only the generic three:
+   * Auto, Quick response, Think deeper. Hardcoding the tone map meant the app
+   * confidently offered GPT 5.6 on accounts that have never had it, failed to
+   * find the menu entry, and silently answered as Auto instead.
+   *
+   * So: enumerate the real menu and match against known labels. Anything not on
+   * screen is not offered.
+   */
+  async discoverTones() {
+    const trigger = await this._findPickerTrigger();
+    if (!trigger) return null;
+    try {
+      await trigger.click({ timeout: 5000 });
+      await this.page.waitForTimeout(2500);
+
+      const seen = new Set();
+      const collect = async () => {
+        for (const role of ['menuitemradio', 'menuitem', 'option']) {
+          let all = [];
+          try { all = await this.page.getByRole(role).all(); } catch { continue; }
+          for (const it of all) {
+            try {
+              if (await it.isVisible()) {
+                seen.add(((await it.innerText()) || '').split(/\s+/).join(' '));
+              }
+            } catch { /* skip */ }
+          }
+        }
+      };
+      await collect();
+      // Named models hide behind a provider submenu that opens on hover.
+      for (const role of ['menuitem']) {
+        let all = [];
+        try { all = await this.page.getByRole(role).all(); } catch { continue; }
+        for (const it of all) {
+          try {
+            const t = ((await it.innerText()) || '').toLowerCase();
+            if (!/gpt|openai|claude|anthropic/.test(t)) continue;
+            await it.hover();
+            await this.page.waitForTimeout(1800);
+            await collect();
+          } catch { /* skip */ }
+        }
+      }
+      try { await this.page.keyboard.press('Escape'); } catch { /* ignore */ }
+
+      const menu = [...seen].join(' || ').toLowerCase();
+      const available = Object.keys(TONES)
+        .filter((id) => menu.includes(TONES[id].label.toLowerCase()));
+      return available.length ? available : null;
+    } catch {
+      try { await this.page.keyboard.press('Escape'); } catch { /* ignore */ }
+      return null;
+    }
+  }
+
+  /** Best tone this account actually has: newest GPT, else the deepest generic. */
+  get defaultTone() {
+    const pool = this.availableTones && this.availableTones.length
+      ? Object.fromEntries(this.availableTones.map((id) => [id, TONES[id]]))
+      : TONES;
+    const gpt = highestGptTone(pool);
+    if (gpt !== BROWSER_DEFAULT_TONE) return gpt;
+    for (const fallback of ['Reasoning', 'Chat', 'Magic']) {
+      if (pool[fallback]) return fallback;
+    }
+    return BROWSER_DEFAULT_TONE;
+  }
+
+  async _selectTone(tone) {
+    const wanted = (TONES[tone] || {}).label;
+    if (!wanted) return false;
+    if (this.availableTones && !this.availableTones.includes(tone)) return false;
+
+    const trigger = await this._findPickerTrigger();
     if (!trigger) return false;
 
     await trigger.click({ timeout: 5000 });
@@ -444,7 +527,8 @@ class CopilotDriver {
    * pure deltas, so the longest prefix per message id is tracked and only the
    * new tail is yielded.
    */
-  async *prompt(text, { tone = DEFAULT_TONE, images = [], timeoutMs = 300_000 } = {}) {
+  async *prompt(text, { tone = null, images = [], timeoutMs = 300_000 } = {}) {
+    tone = tone || this.defaultTone;
     // Serialise turns: one browser, one conversation.
     let release;
     const mine = new Promise((r) => { release = r; });
