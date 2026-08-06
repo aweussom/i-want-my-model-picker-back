@@ -440,8 +440,21 @@ Known gaps are in [TODO.md](TODO.md).
 
 Signed into a **work or school** account, everything here runs against your
 employer's tenant under your own identity, with tenant audit logging and whatever
-your acceptable-use policy says about non-browser clients. A personal Microsoft
-account is the safer thing to demo and publish against.
+your acceptable-use policy says about non-browser clients.
+
+An earlier version of this file suggested using a personal Microsoft account
+instead. **That does not work**, and the correction is worth stating plainly
+because it is part of the same licensing story. Signing into
+`m365.cloud.microsoft/chat` with a free consumer account gets an upsell wall:
+
+> *"Oppgrader Microsoft 365 til å bruke Copilot Chat"* — upgrade your Microsoft
+> 365 subscription to use Copilot Chat.
+
+So this surface is work/school only unless you pay for a Microsoft 365
+subscription. Between that and the official Chat API requiring the separate
+Copilot **add-on** licence, there is no free route to the thing this project
+drives. The consumer product at `copilot.microsoft.com` is a different backend
+and none of the findings here have been tested against it.
 
 ## Credit
 

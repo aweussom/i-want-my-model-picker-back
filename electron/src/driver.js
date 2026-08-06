@@ -220,6 +220,13 @@ class CopilotDriver {
       headless: this.headless,
       viewport: { width: 1500, height: 950 },
       args: ['--disable-blink-features=AutomationControlled'],
+      // Playwright disables the Chromium sandbox by default, which means it
+      // passes --no-sandbox. Invisible with its own bundled Chromium, but a
+      // branded Chrome shows "You are using an unsupported command-line flag"
+      // across the top -- and the warning is right. This browser is signed into
+      // a real Microsoft account and browsing the real web; its renderers should
+      // be sandboxed like any other. Nothing here needs the sandbox off.
+      chromiumSandbox: true,
     };
     const attempts = this.channel
       ? [this.channel]

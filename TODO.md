@@ -9,9 +9,17 @@
 
 - Remove the dead `SENTINEL_DONE` constant in `driver.py`.
 
-- Capture the tone enum on a **personal Microsoft account**. Everything
-  documented here comes from a work tenant on `licenseType=Starter`; a consumer
-  account is a different surface and may not offer `Gpt_5_6_Reasoning` at all.
+- **A personal Microsoft account cannot reach this surface at all.** Signing into
+  `m365.cloud.microsoft/chat` with a free consumer account returns "Oppgrader
+  Microsoft 365 til a bruke Copilot Chat" -- an upsell wall. So the plan of
+  reproducing everything on a personal account, to keep a work tenant out of it,
+  is closed unless you buy a Microsoft 365 subscription. Everything documented
+  here therefore comes from one work tenant on `licenseType=Starter`.
+
+- Untested: whether any of this applies to the consumer product at
+  `copilot.microsoft.com`. It is a different backend, so `tone` may not exist
+  there at all. That is a separate investigation, and possibly a better one to
+  publish from.
 
 - `driver.py` has no cancel path into the browser. `/v1/cancel` sets a flag that
   stops the generator, but Copilot keeps generating in the page. Wire it to the
