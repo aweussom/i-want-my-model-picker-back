@@ -175,6 +175,7 @@ function createServer(driver) {
         availableTones: driver ? driver.availableTones : null,
         browser: driver ? driver.usingChannel : null,
         headless: driver ? driver.headless : null,
+        conversationId: driver ? driver.currentConversationId() : null,
         sandbox: driver ? driver.sandboxEnabled : null,
         chathub: Boolean(socket),
         licenseType: licence ? decodeURIComponent(licence[1]) : null,

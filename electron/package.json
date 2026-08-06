@@ -1,6 +1,6 @@
 {
   "name": "i-want-my-model-picker-back",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Electron app and OpenAI-compatible endpoint for M365 Copilot, with a working model parameter",
   "main": "src/main.js",
   "license": "MIT",

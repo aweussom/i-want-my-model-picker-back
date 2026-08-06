@@ -11,8 +11,8 @@
  */
 
 const assert = require('node:assert/strict');
-const { CITATION_RE, splitRecords, isChathub, isUpload, TONES, DEFAULT_TONE } =
-  require('./driver.js');
+const { CITATION_RE, splitRecords, isChathub, isUpload, TONES, DEFAULT_TONE,
+        toneMatches } = require('./driver.js');
 
 let passed = 0;
 const check = (name, fn) => {
@@ -61,12 +61,19 @@ console.log('tones');
 check('five tones, and the newest GPT is what we request by default', () => {
   assert.equal(Object.keys(TONES).length, 5);
   assert.equal(DEFAULT_TONE, 'Gpt_5_6_Reasoning');
-  assert.deepEqual(TONES.Gpt_5_6_Reasoning.labels,
-    ['GPT 5.6 Think deeper', 'GPT 5.6 Tenk dypere']);
+  // The menu entry and the selected-state button use different names, so both
+  // the long form and the shortTitle have to be present.
+  assert.ok(TONES.Gpt_5_6_Reasoning.labels.includes('GPT 5.6 Think deeper'));
+  assert.ok(TONES.Gpt_5_6_Reasoning.labels.includes('GPT 5.6 Think'));
 });
 
+console.log('short titles');
+check('the picker button shortTitle still identifies the tone', () =>
+  assert.ok(toneMatches('Gpt_5_6_Reasoning', 'GPT 5.6 Think')));
+check('a generic tone is not matched by a GPT shortTitle', () =>
+  assert.ok(!toneMatches('Reasoning', 'GPT 5.6 Think')));
+
 console.log('localised label matching');
-const { toneMatches } = require('./driver.js');
 check('matches the English menu entry', () =>
   assert.ok(toneMatches('Reasoning', 'Think deeper Think longer for better answers')));
 check('matches the Norwegian menu entry', () =>

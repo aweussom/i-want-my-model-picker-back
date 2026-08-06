@@ -21,12 +21,17 @@ const imagePreviewImg = document.getElementById('image-preview-img');
 const imageRemove = document.getElementById('image-remove');
 const dropOverlay = document.getElementById('drop-overlay');
 const browserToggle = document.getElementById('browser-toggle');
+const historyToggle = document.getElementById('history-toggle');
+const historyPanel = document.getElementById('history-panel');
+const historyList = document.getElementById('history-list');
+const historyRefresh = document.getElementById('history-refresh');
 
 let chatHistory = [];
 let thinkExpanded = false;
 let isGenerating = false;
 let abortController = null;
 let pendingImage = null;   // data: URI of the image attached to the next message
+let currentConversationId = null;
 
 const MAX_IMAGE_BYTES = 3 * 1024 * 1024;   // backend vision limit (3 MB)
 
@@ -79,6 +84,11 @@ async function checkHealth() {
         statusDot.title = data.status;
         // The server reports whether the Copilot browser is hidden, so the
         // toggle can show what it will do rather than what it is.
+        if (data.conversationId !== undefined) {
+            const changed = currentConversationId !== data.conversationId;
+            currentConversationId = data.conversationId;
+            if (changed) markCurrentConversation();
+        }
         if (browserToggle && typeof data.headless === 'boolean') {
             browserToggle.dataset.headless = String(data.headless);
             browserToggle.textContent = data.headless ? '\u{1F441}' : '\u{1F648}';
@@ -115,7 +125,101 @@ async function loadModels() {
     } catch {}
 }
 
+// --- Older conversations ---
+//
+// A fold-in panel rather than a permanent column: this window is a chat, and the
+// history is something you reach for occasionally.
+
+function markCurrentConversation() {
+    if (!historyList) return;
+    for (const el of historyList.querySelectorAll('.history-item')) {
+        el.classList.toggle('current', el.dataset.id === currentConversationId);
+    }
+}
+
+async function loadConversations() {
+    if (!historyList) return;
+    historyList.innerHTML = '<div class="history-empty">loading...</div>';
+    try {
+        const resp = await fetch('/v1/conversations');
+        const data = await resp.json();
+        const items = data.data || [];
+        historyList.innerHTML = '';
+        if (!items.length) {
+            historyList.innerHTML =
+                '<div class="history-empty">No earlier conversations found.</div>';
+            return;
+        }
+        for (const c of items) {
+            const btn = document.createElement('button');
+            btn.className = 'history-item';
+            btn.dataset.id = c.id;
+            const name = document.createElement('span');
+            name.className = 'name';
+            // Titles are the user's own prompts. Set them as text, never as HTML.
+            name.textContent = c.name || '(untitled)';
+            btn.appendChild(name);
+            const bits = [
+                c.tone,
+                c.updated ? new Date(c.updated).toLocaleString() : null,
+            ].filter(Boolean);
+            if (bits.length) {
+                const sub = document.createElement('span');
+                sub.className = 'sub';
+                sub.textContent = bits.join('  -  ');
+                btn.appendChild(sub);
+            }
+            btn.title = c.preview || c.id;
+            btn.addEventListener('click', () => openConversation(c));
+            historyList.appendChild(btn);
+        }
+        markCurrentConversation();
+    } catch {
+        historyList.innerHTML =
+            '<div class="history-empty">Could not load the list.</div>';
+    }
+}
+
+async function openConversation(c) {
+    if (isGenerating) return;
+    const buttons = historyList.querySelectorAll('.history-item');
+    buttons.forEach((b) => { b.disabled = true; });
+    try {
+        const resp = await fetch('/v1/conversations/open', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: c.id, tone: c.tone || undefined }),
+        });
+        const result = await resp.json();
+        if (!resp.ok) throw new Error((result.error && result.error.message) || 'failed');
+
+        // Copilot has the thread and its history; this window does not. Saying so
+        // is better than an empty pane that looks like the context was lost.
+        newChat();
+        addMessage('assistant', 'Reopened **' + (c.name || 'conversation')
+            + '**. Copilot still has its full history even though this window starts '
+            + 'empty, so you can carry on where you left off. Model: '
+            + (result.tone || 'unknown') + '.');
+        if (result.tone) {
+            for (const opt of modelSelect.options) {
+                if (opt.value === result.tone) modelSelect.value = result.tone;
+            }
+        }
+        closeHistory();
+        await checkHealth();
+    } catch (e) {
+        addMessage('assistant', 'Could not reopen that conversation: ' + e.message);
+    } finally {
+        buttons.forEach((b) => { b.disabled = false; });
+    }
+}
+
+function closeHistory() {
+    if (historyPanel) historyPanel.classList.remove('open');
+}
+
 // --- Request ---
+
 
 function buildRequestBody() {
     return {
@@ -590,6 +694,15 @@ if (browserToggle) {
         }
     });
 }
+
+if (historyToggle) {
+    historyToggle.addEventListener('click', () => {
+        const opening = !historyPanel.classList.contains('open');
+        historyPanel.classList.toggle('open', opening);
+        if (opening) loadConversations();
+    });
+}
+if (historyRefresh) historyRefresh.addEventListener('click', loadConversations);
 
 artifactClose.addEventListener('click', closeArtifact);
 

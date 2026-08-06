@@ -80,12 +80,18 @@ const TONES = {
     labels: ['Think deeper', 'Tenk dypere'],
     title: 'Think deeper', ownedBy: 'microsoft',
   },
+  // Named models carry a second name. The *menu* entry reads "GPT 5.6 Think
+  // deeper"; the picker button, once selected, shows the shortTitle "GPT 5.6
+  // Think". Both are needed: the long form to find the entry, the short form to
+  // read back what is currently selected. Missing the short form made
+  // readCurrentTone() return null for exactly the named models -- so selection
+  // worked and verification silently disagreed.
   Gpt_5_6_Reasoning: {
-    labels: ['GPT 5.6 Think deeper', 'GPT 5.6 Tenk dypere'],
+    labels: ['GPT 5.6 Think deeper', 'GPT 5.6 Tenk dypere', 'GPT 5.6 Think'],
     title: 'GPT 5.6 Think deeper', ownedBy: 'openai',
   },
   Gpt_5_5_Chat: {
-    labels: ['GPT 5.5 Quick response', 'GPT 5.5 Raskt svar'],
+    labels: ['GPT 5.5 Quick response', 'GPT 5.5 Raskt svar', 'GPT 5.5 Quick'],
     title: 'GPT 5.5 Quick response', ownedBy: 'openai',
   },
 };
@@ -267,6 +273,66 @@ class CopilotDriver {
   }
 
   /**
+   * Open the model picker menu, and be sure it is actually open.
+   *
+   * The trigger is a toggle. Clicking it blindly is a coin flip: if a previous
+   * call left the menu open -- an Escape that did not land, a hover that kept it
+   * alive -- the click *closes* it, and the caller then reads an empty menu and
+   * concludes the account offers no models. That is exactly how tone discovery
+   * came back NULL on every other attempt.
+   *
+   * `aria-expanded` on the trigger is the authoritative state, so use it rather
+   * than assuming.
+   */
+  async _openPickerMenu(trigger) {
+    const expanded = async () => (await trigger.getAttribute('aria-expanded')) === 'true';
+
+    if (await expanded()) {
+      try { await this.page.keyboard.press('Escape'); } catch { /* ignore */ }
+      await this.page.waitForTimeout(400);
+    }
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        await trigger.click({ timeout: 5000 });
+      } catch {
+        return false;
+      }
+      await this.page.waitForTimeout(2500);   // the menu takes well over a second
+      if (await expanded()) return true;
+      // Closed rather than opened: we toggled the wrong way. Try once more.
+      await this.page.waitForTimeout(500);
+    }
+    return false;
+  }
+
+  async _closePickerMenu(trigger) {
+    try {
+      if ((await trigger.getAttribute('aria-expanded')) === 'true') {
+        await this.page.keyboard.press('Escape');
+        await this.page.waitForTimeout(300);
+      }
+    } catch { /* nothing to close */ }
+  }
+
+  /**
+   * The conversation the browser is currently in, or null for an unsent new chat.
+   *
+   * Copilot navigates to /chat/conversation/<id> once a thread exists, so the URL
+   * is the cheapest source. The Chathub socket URL carries ConversationId too and
+   * is used as a fallback, since navigation can lag a turn.
+   */
+  currentConversationId() {
+    try {
+      const fromUrl = /\/chat\/conversation\/([0-9a-f-]{16,})/i.exec(this.page.url());
+      if (fromUrl) return fromUrl[1];
+    } catch { /* page may be gone */ }
+    const fromSocket = this.socketUrl
+      && /[?&]ConversationId=([0-9a-f-]{16,})/i.exec(this.socketUrl);
+    return fromSocket ? fromSocket[1] : null;
+  }
+
+  /**
    * Which tone the page is currently showing.
    *
    * The picker trigger's visible text *is* the current selection, so this reads
@@ -345,28 +411,33 @@ class CopilotDriver {
    * the driver does not then "helpfully" reset the picker.
    */
   async openConversation(id, { tone = null } = {}) {
-    if (!/^[0-9a-f-]{16,}$/i.test(String(id))) throw new Error('implausible conversation id');
     let release;
     const mine = new Promise((r) => { release = r; });
     const previous = this._busy;
     this._busy = this._busy.then(() => mine);
     await previous;
     try {
-      await this.page.goto(`https://m365.cloud.microsoft/chat/conversation/${id}`,
-        { waitUntil: 'domcontentloaded' });
-      const composer = await this._waitComposer(120);
-      if (!composer) throw new Error('conversation did not load a composer');
-      await this.page.waitForTimeout(1500);
-      // Prefer what the page says over what the listing claimed: the picker
-      // trigger's own text is the live truth, and the sidebar fallback has no
-      // tone at all.
-      this.currentTone = (await this.readCurrentTone())
-        || (tone && TONES[tone] ? tone : BROWSER_DEFAULT_TONE);
-      this._conversationPinned = true;
-      return { id, tone: this.currentTone, pinned: true };
+      return await this._openConversation(id, { tone });
     } finally {
       release();
     }
+  }
+
+  /** As openConversation, but assumes the caller already holds the turn lock. */
+  async _openConversation(id, { tone = null } = {}) {
+    if (!/^[0-9a-f-]{16,}$/i.test(String(id))) throw new Error('implausible conversation id');
+    await this.page.goto(`https://m365.cloud.microsoft/chat/conversation/${id}`,
+      { waitUntil: 'domcontentloaded' });
+    const composer = await this._waitComposer(120);
+    if (!composer) throw new Error('conversation did not load a composer');
+    await this.page.waitForTimeout(1500);
+    // Prefer what the page says over what the listing claimed: the picker
+    // trigger's own text is the live truth, and the sidebar fallback carries no
+    // tone at all.
+    this.currentTone = (await this.readCurrentTone())
+      || (tone && TONES[tone] ? tone : BROWSER_DEFAULT_TONE);
+    this._conversationPinned = true;
+    return { id, tone: this.currentTone, pinned: true };
   }
 
   /**
@@ -390,16 +461,31 @@ class CopilotDriver {
     this._busy = this._busy.then(() => mine);
     await previous;
     try {
+      // Note where we were before throwing the browser away, so the toggle stops
+      // costing you the thread. A new browser genuinely is a new conversation --
+      // but an existing conversation can be reopened, so it need not stay lost.
+      const wasIn = this.currentConversationId();
+
       try { await this.context.close(); } catch { /* already gone */ }
       this.ready = false;
       this.socketUrl = null;
       this.availableTones = null;
-      this.currentTone = BROWSER_DEFAULT_TONE;   // new browser, new conversation
+      this.currentTone = BROWSER_DEFAULT_TONE;
       this._conversationPinned = false;
       this.headless = !visible;
       this.context = await this._launch();
       await this._afterLaunch(visible ? 12 * 60 * 1000 : 60 * 1000, null);
-      return { changed: true, headless: this.headless };
+
+      let restored = null;
+      if (wasIn) {
+        try {
+          // _openConversation, not openConversation: we already hold the lock.
+          restored = (await this._openConversation(wasIn)).id;
+        } catch {
+          restored = null;   // gone or inaccessible; a fresh chat is the fallback
+        }
+      }
+      return { changed: true, headless: this.headless, restored };
     } finally {
       release();
     }
@@ -603,8 +689,7 @@ class CopilotDriver {
     const trigger = await this._findPickerTrigger();
     if (!trigger) return null;
     try {
-      await trigger.click({ timeout: 5000 });
-      await this.page.waitForTimeout(2500);
+      if (!(await this._openPickerMenu(trigger))) return null;
 
       const seen = new Set();
       const collect = async () => {
@@ -635,13 +720,13 @@ class CopilotDriver {
           } catch { /* skip */ }
         }
       }
-      try { await this.page.keyboard.press('Escape'); } catch { /* ignore */ }
+      await this._closePickerMenu(trigger);
 
       const menu = [...seen].join(' || ').toLowerCase();
       const available = Object.keys(TONES).filter((id) => toneMatches(id, menu));
       return available.length ? available : null;
     } catch {
-      try { await this.page.keyboard.press('Escape'); } catch { /* ignore */ }
+      await this._closePickerMenu(trigger);
       return null;
     }
   }
@@ -668,12 +753,7 @@ class CopilotDriver {
 
     // A failure here must not take the turn down with it: on an account with no
     // picker at all, this is expected, and the caller degrades to the current tone.
-    try {
-      await trigger.click({ timeout: 5000 });
-    } catch {
-      return false;
-    }
-    await this.page.waitForTimeout(2500);   // the menu takes well over a second
+    if (!(await this._openPickerMenu(trigger))) return false;
 
     const items = async () => {
       const out = [];
@@ -719,7 +799,7 @@ class CopilotDriver {
       if (await clickMatch(await items())) return true;
     }
 
-    try { await this.page.keyboard.press('Escape'); } catch { /* ignore */ }
+    await this._closePickerMenu(trigger);
     return false;
   }
 

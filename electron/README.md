@@ -199,3 +199,23 @@ for a different model still starts a new thread, because it has to.
 `readCurrentTone()` reads the picker trigger's own text rather than trusting what
 we last set, which is also how a reopened thread's tone is recovered when the
 listing does not carry it.
+
+## Two flakiness bugs worth naming
+
+Both only showed up when the same operation ran more than once, which is why the
+first pass looked fine.
+
+**The picker menu is a toggle.** `discoverTones()` clicked the trigger blindly. If
+a previous call had left the menu open -- an Escape that did not land, a hover that
+kept it alive -- the click *closed* it, the collector read an empty menu, and the
+conclusion was "this account offers no models". Repeated runs alternated between
+five tones and `NULL`. `aria-expanded` on the trigger is the authoritative state,
+so `_openPickerMenu()` now reads it, escapes first if needed, and verifies the menu
+actually opened. Four consecutive runs: 4/4.
+
+**The picker button and the menu use different names.** The menu entry reads "GPT
+5.6 Think deeper"; the button, once that is selected, reads the shortTitle "GPT
+5.6 Think". Only the long form was in the alias list, so `readCurrentTone()`
+returned `null` for exactly the named models -- selection worked and verification
+silently disagreed, which then mis-reported the tone of a reopened conversation.
+Repeated alternating selection: 2/6 before, 6/6 after.

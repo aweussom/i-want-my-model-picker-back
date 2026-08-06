@@ -13,10 +13,23 @@
     <div class="header-controls">
         <!-- Values are `tone` ids, sent as the OpenAI `model` parameter.
              Switching starts a new Copilot conversation: tone is per-thread. -->
+        <button class="btn icon" id="history-toggle"
+                title="Older conversations">&#9776;</button>
         <select id="model-select" title="Maps to the tone field on the wire"></select>
         <button class="btn icon" id="browser-toggle"
                 title="Show or hide the Copilot browser doing the work">&#128065;</button>
         <div class="status-dot" id="status-dot" title="checking..."></div>
+    </div>
+</div>
+
+<div class="history-panel" id="history-panel">
+    <div class="history-header">
+        <span>Older conversations</span>
+        <button class="btn icon" id="history-refresh" title="Refresh">&#10227;</button>
+    </div>
+    <div class="history-list" id="history-list"></div>
+    <div class="history-note">
+        Opening one continues it in Copilot, and restores the model it was using.
     </div>
 </div>
 
