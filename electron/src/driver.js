@@ -206,6 +206,7 @@ class CopilotDriver {
     this.usingChannel = null;
     this.sandboxEnabled = null;
     this.availableTones = null;   // filled by discoverTones() at startup
+    this._conversationPinned = false;   // true while continuing a reopened thread
     this.currentTone = BROWSER_DEFAULT_TONE;   // what a fresh conversation is on
     this.socketUrl = null;
     this.ready = false;
@@ -263,6 +264,145 @@ class CopilotDriver {
     this.headless = false;
     this.context = await this._launch();
     return this._afterLaunch(signInTimeoutMs, onWait);
+  }
+
+  /**
+   * Which tone the page is currently showing.
+   *
+   * The picker trigger's visible text *is* the current selection, so this reads
+   * the live state rather than trusting what we last set. Locale-aware via the
+   * tone aliases, which is why it survives a Norwegian UI.
+   */
+  async readCurrentTone() {
+    const trigger = await this._findPickerTrigger();
+    if (!trigger) return null;
+    const text = await trigger.innerText().catch(() => '');
+    if (!text) return null;
+    // Longest label first, so "GPT 5.6 Think deeper" wins over "Think deeper".
+    const ids = Object.keys(TONES).sort(
+      (a, b) => Math.max(...TONES[b].labels.map((l) => l.length))
+              - Math.max(...TONES[a].labels.map((l) => l.length)),
+    );
+    return ids.find((id) => toneMatches(id, text)) || null;
+  }
+
+  /**
+   * List the account's existing Copilot conversations.
+   *
+   * Same action the web client uses for its own sidebar. Issued from inside the
+   * page so the session and CORS context come along for free -- no token
+   * handling, no endpoint of our own to keep in step.
+   *
+   * Falls back to reading the sidebar DOM, because the action's exact payload has
+   * changed shape before and a rendered list is harder to break.
+   */
+  async listConversations({ limit = 40 } = {}) {
+    const viaAction = await this.page.evaluate(async () => {
+      try {
+        const r = await fetch('/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'GetConversationPageHistoryList' }),
+        });
+        if (!r.ok) return null;
+        const j = await r.json();
+        const chats = j?.store?.conversationPageHistoryList?.chats;
+        return Array.isArray(chats) ? chats : null;
+      } catch { return null; }
+    }).catch(() => null);
+
+    if (viaAction) {
+      return viaAction.slice(0, limit).map((c) => ({
+        id: c.conversationId,
+        name: c.chatName || '(untitled)',
+        tone: c.tone || null,
+        preview: (c.preview || '').slice(0, 200) || null,
+        updated: c.updateTimeUtc || null,
+        source: 'action',
+      }));
+    }
+
+    // The sidebar links carry /chat/conversation/<id> and their own labels.
+    const viaDom = await this.page.evaluate(() => Array.from(
+      document.querySelectorAll('a[href*="/chat/conversation/"]'),
+    ).map((a) => ({
+      id: (a.getAttribute('href') || '').split('/chat/conversation/')[1] || null,
+      name: (a.getAttribute('aria-label') || a.textContent || '').trim(),
+    })).filter((x) => x.id)).catch(() => []);
+
+    const seen = new Set();
+    return viaDom.filter((c) => !seen.has(c.id) && seen.add(c.id))
+      .slice(0, limit)
+      .map((c) => ({ ...c, tone: null, preview: null, updated: null, source: 'dom' }));
+  }
+
+  /**
+   * Open an existing conversation so the next prompt continues it.
+   *
+   * Navigating restores it server-side, which matters more than it sounds: `tone`
+   * is a property of the conversation, so reopening an old thread also restores
+   * the model it was using. currentTone is set from the listing when known, so
+   * the driver does not then "helpfully" reset the picker.
+   */
+  async openConversation(id, { tone = null } = {}) {
+    if (!/^[0-9a-f-]{16,}$/i.test(String(id))) throw new Error('implausible conversation id');
+    let release;
+    const mine = new Promise((r) => { release = r; });
+    const previous = this._busy;
+    this._busy = this._busy.then(() => mine);
+    await previous;
+    try {
+      await this.page.goto(`https://m365.cloud.microsoft/chat/conversation/${id}`,
+        { waitUntil: 'domcontentloaded' });
+      const composer = await this._waitComposer(120);
+      if (!composer) throw new Error('conversation did not load a composer');
+      await this.page.waitForTimeout(1500);
+      // Prefer what the page says over what the listing claimed: the picker
+      // trigger's own text is the live truth, and the sidebar fallback has no
+      // tone at all.
+      this.currentTone = (await this.readCurrentTone())
+        || (tone && TONES[tone] ? tone : BROWSER_DEFAULT_TONE);
+      this._conversationPinned = true;
+      return { id, tone: this.currentTone, pinned: true };
+    } finally {
+      release();
+    }
+  }
+
+  /**
+   * Show or hide the browser.
+   *
+   * Playwright cannot toggle headless on a running context, so this closes the
+   * browser and launches a new one. That has a consequence worth surfacing rather
+   * than hiding: a new browser is a new Copilot conversation, so the current
+   * thread and its context are gone, and `tone` resets to what a fresh chat uses.
+   *
+   * Serialised against turns on the same lock as prompt(), so it cannot pull the
+   * browser out from under a request in flight.
+   */
+  async setVisible(visible) {
+    if (this.headless === !visible) {
+      return { changed: false, headless: this.headless };
+    }
+    let release;
+    const mine = new Promise((r) => { release = r; });
+    const previous = this._busy;
+    this._busy = this._busy.then(() => mine);
+    await previous;
+    try {
+      try { await this.context.close(); } catch { /* already gone */ }
+      this.ready = false;
+      this.socketUrl = null;
+      this.availableTones = null;
+      this.currentTone = BROWSER_DEFAULT_TONE;   // new browser, new conversation
+      this._conversationPinned = false;
+      this.headless = !visible;
+      this.context = await this._launch();
+      await this._afterLaunch(visible ? 12 * 60 * 1000 : 60 * 1000, null);
+      return { changed: true, headless: this.headless };
+    } finally {
+      release();
+    }
   }
 
   async _afterLaunch(signInTimeoutMs, onWait) {
@@ -634,7 +774,14 @@ class CopilotDriver {
    * new tail is yielded.
    */
   async *prompt(text, { tone = null, images = [], timeoutMs = 300_000 } = {}) {
-    tone = tone || this.defaultTone;
+    // An unspecified model means "whatever this conversation is on", not "my
+    // preferred default". That distinction only shows up once you can reopen an
+    // old thread: the default would differ from the thread's tone, the tone-change
+    // path would navigate to the base chat URL to reach the picker, and the
+    // conversation you just reopened would be silently abandoned. The default
+    // applies to *new* conversations.
+    if (!tone) tone = this._conversationPinned ? this.currentTone : this.defaultTone;
+    else this._conversationPinned = false;   // an explicit switch starts a new thread
     // Serialise turns: one browser, one conversation.
     let release;
     const mine = new Promise((r) => { release = r; });

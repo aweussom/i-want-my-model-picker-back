@@ -168,3 +168,34 @@ compare `window.outerHeight - window.innerHeight`:
 | none | 95 px |
 
 That 56 px is the infobar. None of Playwright's own default flags trigger it.
+
+## Reopening old conversations
+
+`tone` is a property of the conversation, which turns out to cut both ways: it is
+why switching model costs you a thread, and it is why reopening a thread restores
+the model it was on.
+
+```
+GET  /v1/conversations           list them
+POST /v1/conversations/open      {"id": "..."}  continue one
+POST /v1/browser                 {"visible": true|false}  show/hide the browser
+```
+
+Listing uses the same `GetConversationPageHistoryList` action the sidebar uses,
+issued from inside the page so the session comes along for free, and falls back to
+reading the sidebar's `/chat/conversation/<id>` links when the action's payload
+shape changes.
+
+Verified end to end: seed a thread with a codeword on GPT 5.6, start an unrelated
+conversation on Auto, reopen the first, ask for the codeword — it comes back.
+
+The subtlety that made the first attempt fail: an **unspecified** `model` means
+"whatever this conversation is on", not "my preferred default". Otherwise the
+default differs from the reopened thread's tone, the tone-change path navigates to
+the base chat URL to reach the picker, and the conversation you just restored is
+silently abandoned. The default applies to *new* conversations. Asking explicitly
+for a different model still starts a new thread, because it has to.
+
+`readCurrentTone()` reads the picker trigger's own text rather than trusting what
+we last set, which is also how a reopened thread's tone is recovered when the
+listing does not carry it.

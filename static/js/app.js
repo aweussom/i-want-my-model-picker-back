@@ -20,6 +20,7 @@ const imagePreview = document.getElementById('image-preview');
 const imagePreviewImg = document.getElementById('image-preview-img');
 const imageRemove = document.getElementById('image-remove');
 const dropOverlay = document.getElementById('drop-overlay');
+const browserToggle = document.getElementById('browser-toggle');
 
 let chatHistory = [];
 let thinkExpanded = false;
@@ -76,6 +77,15 @@ async function checkHealth() {
         const data = await resp.json();
         statusDot.className = 'status-dot ' + data.status;
         statusDot.title = data.status;
+        // The server reports whether the Copilot browser is hidden, so the
+        // toggle can show what it will do rather than what it is.
+        if (browserToggle && typeof data.headless === 'boolean') {
+            browserToggle.dataset.headless = String(data.headless);
+            browserToggle.textContent = data.headless ? '\u{1F441}' : '\u{1F648}';
+            browserToggle.title = data.headless
+                ? 'Show the Copilot browser (starts a new conversation)'
+                : 'Hide the Copilot browser (starts a new conversation)';
+        }
     } catch {
         statusDot.className = 'status-dot error';
         statusDot.title = 'disconnected';
@@ -89,11 +99,17 @@ async function loadModels() {
         modelSelect.innerHTML = '';
         for (const m of data.data) {
             const opt = document.createElement('option');
+            // The value must stay the wire id -- it is sent as `model` and maps
+            // onto `tone`. The label should not: "Reasoning (MICROSOFT)" is a
+            // protocol identifier, and the server already sends the name the
+            // picker itself uses. Fall back to the id when there is no
+            // description, e.g. against an agentry-style backend.
             opt.value = m.id;
-            const parts = m.id.split('@');
-            const name = parts[0];
-            const device = parts[1] || (m.owned_by || '').replace('local-', '').toUpperCase();
-            opt.textContent = device ? `${name} (${device})` : name;
+            const name = m.description || m.id.split('@')[0];
+            const owner = m.id.split('@')[1]
+                || (m.owned_by || '').replace('local-', '');
+            opt.textContent = owner ? `${name} (${owner})` : name;
+            opt.title = m.id;
             modelSelect.appendChild(opt);
         }
     } catch {}
@@ -541,6 +557,39 @@ window.addEventListener('drop', (e) => {
     dropOverlay.classList.remove('active');
     setImage(e.dataTransfer?.files?.[0]);
 });
+
+if (browserToggle) {
+    browserToggle.addEventListener('click', async () => {
+        // Playwright cannot change headless on a running browser, so this
+        // relaunches it -- which starts a fresh Copilot conversation. Confirm
+        // rather than silently discarding the thread.
+        const hidden = browserToggle.dataset.headless === 'true';
+        const verb = hidden ? 'Show' : 'Hide';
+        const warning = [
+            verb + ' the Copilot browser?',
+            '',
+            'This relaunches it, which starts a new conversation.',
+            'The current thread will be gone.',
+        ].join('\n');
+        if (!confirm(warning)) return;
+        browserToggle.disabled = true;
+        const previous = browserToggle.textContent;
+        browserToggle.textContent = '⏳';
+        try {
+            await fetch('/v1/browser', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ visible: hidden }),
+            });
+            newChat();
+        } catch {
+            browserToggle.textContent = previous;
+        } finally {
+            browserToggle.disabled = false;
+            checkHealth();
+        }
+    });
+}
 
 artifactClose.addEventListener('click', closeArtifact);
 

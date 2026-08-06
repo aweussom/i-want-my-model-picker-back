@@ -174,6 +174,7 @@ function createServer(driver) {
         defaultTone: driver ? driver.defaultTone : null,
         availableTones: driver ? driver.availableTones : null,
         browser: driver ? driver.usingChannel : null,
+        headless: driver ? driver.headless : null,
         sandbox: driver ? driver.sandboxEnabled : null,
         chathub: Boolean(socket),
         licenseType: licence ? decodeURIComponent(licence[1]) : null,
@@ -200,6 +201,46 @@ function createServer(driver) {
           description: TONES[id].title,
         })),
       });
+    }
+
+    if (route === '/v1/conversations' && req.method === 'GET') {
+      try {
+        return json(res, 200, { data: await driver.listConversations() });
+      } catch (e) {
+        return json(res, 502, { error: { message: e.message } });
+      }
+    }
+
+    if (route === '/v1/conversations/open' && req.method === 'POST') {
+      // Reopening restores the thread server-side, and with it the tone it was
+      // using -- tone is a property of the conversation, not of the session.
+      let body = {};
+      try { body = await readBody(req); } catch { /* validated below */ }
+      if (!body.id) return json(res, 400, { error: { message: 'id required' } });
+      try {
+        return json(res, 200, await driver.openConversation(body.id, { tone: body.tone }));
+      } catch (e) {
+        return json(res, 502, { error: { message: e.message } });
+      }
+    }
+
+    if (route === '/v1/browser' && req.method === 'POST') {
+      // Show or hide the Playwright browser. Relaunching is the only way to
+      // change headless, so this starts a new Copilot conversation -- said out
+      // loud in the response rather than left as a surprise.
+      let body = {};
+      try { body = await readBody(req); } catch { /* default to hide */ }
+      try {
+        const result = await driver.setVisible(Boolean(body.visible));
+        return json(res, 200, {
+          ...result,
+          note: result.changed
+            ? 'browser relaunched; this started a new Copilot conversation'
+            : 'already in that state',
+        });
+      } catch (e) {
+        return json(res, 502, { error: { message: e.message } });
+      }
     }
 
     if (route === '/v1/cancel' && req.method === 'POST') {
