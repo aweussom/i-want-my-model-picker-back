@@ -76,12 +76,50 @@ async function init() {
     input.focus();
 }
 
+/**
+ * Say which account is signed in, and say it before the first message.
+ *
+ * `licenseType` is only knowable once the Chathub socket exists, and that socket
+ * opens lazily on the first send -- so a badge driven purely by it stays blank
+ * through exactly the moment that misleads people: a fresh start, where the
+ * model list looks short and the obvious conclusion is that Microsoft withdrew
+ * something. `availableTones` is filled by picker discovery at startup, so the
+ * absence of named models is reportable immediately. Use the licence once it
+ * arrives; until then, report the offering.
+ */
+function updateLicenceBadge(badge, data) {
+    const tones = data.availableTones || null;
+    const named = (tones || []).filter((t) => /^Gpt_/i.test(t));
+
+    let text = null;
+    if (data.licenseType) text = data.licenseType;
+    else if (tones && !named.length) text = 'generic models only';
+
+    if (!text) { badge.hidden = true; return; }
+    badge.textContent = text;
+    badge.hidden = false;
+
+    const where = data.licenseType ? `licenseType=${data.licenseType}` : 'this account';
+    badge.title = tones && tones.length
+        ? `Signed in on ${where}. Models it offers: ${tones.join(', ')}`
+          + (named.length ? '' : '\nNo named GPT models here — a work tenant usually has them.')
+        : `Signed in on ${where}. The picker menu could not be read, `
+          + 'so the model list is a guess rather than a discovery.';
+}
+
 async function checkHealth() {
     try {
         const resp = await fetch('/health');
         const data = await resp.json();
         statusDot.className = 'status-dot ' + data.status;
         statusDot.title = data.status;
+        // Show the licence tier, because which account is signed in decides
+        // which models exist. A free consumer account never had the named GPT
+        // entries; a work tenant has them. Without this on screen, "GPT 5.6 is
+        // not offered" looks like Microsoft withdrawing it rather than the app
+        // being signed into the wrong account.
+        const licenceBadge = document.getElementById('licence-badge');
+        if (licenceBadge) updateLicenceBadge(licenceBadge, data);
         // The server reports whether the Copilot browser is hidden, so the
         // toggle can show what it will do rather than what it is.
         if (data.conversationId !== undefined) {

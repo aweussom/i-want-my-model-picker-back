@@ -12,8 +12,7 @@ npx playwright install chromium     # shared with the Python install
 npm run signin                      # sign in once; waits 15 minutes
 npm start                           # the app
 npm run serve                       # API only, port 8791
-node src/driver.spec.js             # 14 checks, no browser needed
-node src/server.spec.js             # 13 checks, no browser needed
+npm test                            # 48 checks, no browser needed
 ```
 
 `COPILOT_PROFILE` picks the profile directory; keep work and personal apart.
@@ -119,9 +118,16 @@ waiting and tells you to look at the other window.
 Which tones exist depends on the account, and this cost a wrong assumption.
 
 A work tenant on `licenseType=Starter` offers the three generic modes *and* named
-models — GPT 5.6 Think deeper, GPT 5.5 Quick response. A **personal Microsoft
+models — GPT 5.6 Think deeper, GPT 5.6 Quick response. A **free consumer
 account offers only the generic three**: Auto, Quick response, Think deeper. No
 named models at all.
+
+This is the single most useful thing to check first when a model "disappears".
+On 2026-09-15 the app reported `Gpt_5_6_Reasoning is not offered` and it looked
+like Microsoft had withdrawn the named models; the app was signed into the free
+consumer account, and the work tenant still had them. The header now shows the
+licence tier for exactly this reason, and says `generic models only` before the
+first message, when `licenseType` is not knowable yet.
 
 Hardcoding the tone map from one tenant meant the app confidently defaulted to
 `Gpt_5_6_Reasoning` on accounts that have never had it, failed to find the menu
@@ -136,7 +142,7 @@ machine you cannot inspect:
 ```json
 {"status":"ready","version":"0.1.2","browser":"chrome","sandbox":true,
  "defaultTone":"Gpt_5_6_Reasoning",
- "availableTones":["Magic","Chat","Reasoning","Gpt_5_6_Reasoning","Gpt_5_5_Chat"],
+ "availableTones":["Magic","Chat","Reasoning","Gpt_5_6_Reasoning","Gpt_5_6_Chat"],
  "licenseType":"Starter"}
 ```
 

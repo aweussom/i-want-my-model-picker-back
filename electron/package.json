@@ -1,12 +1,12 @@
 {
   "name": "i-want-my-model-picker-back",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Electron app and OpenAI-compatible endpoint for M365 Copilot, with a working model parameter",
   "main": "src/main.js",
   "license": "MIT",
   "author": "Tommy Leonhardsen",
   "scripts": {
-    "driver-test": "node src/driver-test.js",
+    "test": "node --test src/driver.spec.js src/server.spec.js",
     "serve": "node src/server.js",
     "start": "electron .",
     "signin": "node src/signin.js",

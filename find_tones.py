@@ -71,7 +71,6 @@ def main() -> int:
             user_data_dir=str(PROFILE_DIR),
             headless=False,
             viewport={"width": 1400, "height": 900},
-            args=["--disable-blink-features=AutomationControlled"],
         )
         page = context.pages[0] if context.pages else context.new_page()
         page.goto(CHAT_URL, wait_until="domcontentloaded")

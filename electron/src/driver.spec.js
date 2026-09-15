@@ -12,7 +12,7 @@
 
 const assert = require('node:assert/strict');
 const { CITATION_RE, splitRecords, isChathub, isUpload, TONES, DEFAULT_TONE,
-        toneMatches } = require('./driver.js');
+        toneMatches, CopilotDriver } = require('./driver.js');
 
 let passed = 0;
 const check = (name, fn) => {
@@ -104,4 +104,65 @@ check('falls back to the browser default when no GPT is listed', () =>
 check('browser default stays Magic, which is the real fresh-chat state', () =>
   assert.equal(BROWSER_DEFAULT_TONE, 'Magic'));
 
-console.log(`\n${passed} checks passed${process.exitCode ? ', WITH FAILURES' : ''}`);
+// --- why the composer is missing ----------------------------------------
+//
+// "composer lost after reload" named the symptom and left four different
+// problems looking identical: an expired session, a verification box, a modal,
+// and a page that is merely slow. Each wants a different response from whoever
+// reads it, so each has to be distinguishable. A stand-in page is enough --
+// the branch that matters is the URL test.
+
+const reasonFor = ({ url = '', title = '', challenge = false, dialog = null }) => {
+  const absent = { count: async () => 0 };
+  const present = {
+    count: async () => 1,
+    isVisible: async () => true,
+    getAttribute: async () => dialog,
+    innerText: async () => dialog,
+  };
+  const self = {
+    page: {
+      url: () => url,
+      title: async () => title,
+      locator: () => ({ first: () => (dialog ? present : absent) }),
+    },
+    _challengeVisible: () => challenge,
+  };
+  return CopilotDriver.prototype._composerLostReason.call(self);
+};
+
+const asyncCheck = async (name, fn) => {
+  try { await fn(); console.log(`  ok   ${name}`); passed++; }
+  catch (e) { console.log(`  FAIL ${name}\n       ${e.message}`); process.exitCode = 1; }
+};
+
+(async () => {
+  console.log('why the composer is missing');
+  await asyncCheck('an expired session is named as such, with the fix', async () => {
+    const r = await reasonFor({ url: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize?x=1' });
+    assert.match(r, /session has expired/);
+    assert.match(r, /login\.microsoftonline\.com/);
+    assert.match(r, /npm run signin/);
+  });
+  await asyncCheck('a consumer login redirect counts too', async () => {
+    assert.match(await reasonFor({ url: 'https://login.live.com/oauth20_authorize.srf' }),
+                 /session has expired/);
+  });
+  await asyncCheck('a verification box is not mistaken for an expired session', async () => {
+    const r = await reasonFor({ url: 'https://m365.cloud.microsoft/chat', challenge: true });
+    assert.match(r, /human-verification/);
+    assert.doesNotMatch(r, /expired/);
+  });
+  await asyncCheck('a modal is reported with its label', async () => {
+    assert.match(
+      await reasonFor({ url: 'https://m365.cloud.microsoft/chat', dialog: 'Sikkerhetskontroll kreves' }),
+      /dialog is covering the page: Sikkerhetskontroll kreves/);
+  });
+  await asyncCheck('an ordinary slow page still reports where it was', async () => {
+    const r = await reasonFor({ url: 'https://m365.cloud.microsoft/chat', title: 'Chat | Microsoft Copilot' });
+    assert.match(r, /composer lost after reload/);
+    assert.match(r, /m365\.cloud\.microsoft/);
+  });
+
+  console.log(`\n${passed} checks passed${process.exitCode ? ', WITH FAILURES' : ''}`);
+})();

@@ -161,7 +161,6 @@ def main() -> int:
             user_data_dir=args.profile,
             headless=False,
             viewport={"width": 1500, "height": 950},
-            args=["--disable-blink-features=AutomationControlled"],
         )
         context.expose_function("__wireTap", rec.tapped)
         context.add_init_script((Path(__file__).parent / "tap.js").read_text(encoding="utf-8"))

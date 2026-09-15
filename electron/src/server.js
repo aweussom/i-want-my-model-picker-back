@@ -314,7 +314,17 @@ if (require.main === module) {
       process.exit(1);
     }
     console.log('starting browser...');
-    const driver = await new CopilotDriver({}).start();
+    // Honour COPILOT_PROFILE the way main.js does. Without it the standalone
+    // server could only ever drive electron/.profile, so testing against a
+    // second account meant editing this file.
+    const profileDir = process.env.COPILOT_PROFILE
+      ? path.resolve(process.env.COPILOT_PROFILE)
+      : undefined;
+    if (profileDir) console.log(`profile: ${profileDir}`);
+    const driver = await new CopilotDriver({
+      profileDir,
+      channel: process.env.COPILOT_CHANNEL || null,
+    }).start();
     console.log(`composer ready; tone=${driver.currentTone}`);
     createServer(driver).listen(port, '127.0.0.1', () => {
       console.log(`chat UI      http://127.0.0.1:${port}/`);
