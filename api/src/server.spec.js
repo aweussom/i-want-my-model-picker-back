@@ -14,7 +14,13 @@ const check = (name, fn) => {
 console.log('model -> tone');
 check('exact id', () => assert.equal(resolveTone('Gpt_5_6_Reasoning'), 'Gpt_5_6_Reasoning'));
 check('menu label', () => assert.equal(resolveTone('GPT 5.6 Think deeper'), 'Gpt_5_6_Reasoning'));
-check('@suffix from the UI', () => assert.equal(resolveTone('Gpt_5_5_Chat@openai'), 'Gpt_5_5_Chat'));
+// The named models churn -- this case said Gpt_5_5_Chat until 2026-09-15, when
+// the tenant's menu replaced 5.5 with 5.6 and the assertion started failing for
+// a reason that had nothing to do with suffix parsing. Pin the behaviour to a
+// generic tone, which does not get renamed, and keep one named case alongside
+// it so a rename is still noticed rather than silently tolerated.
+check('@suffix from the UI', () => assert.equal(resolveTone('Chat@microsoft'), 'Chat'));
+check('@suffix on a named model', () => assert.equal(resolveTone('Gpt_5_6_Chat@openai'), 'Gpt_5_6_Chat'));
 check('unknown model falls back to the default', () => assert.equal(resolveTone('gpt-4o'), DEFAULT_TONE));
 check('missing model falls back to the default', () => assert.equal(resolveTone(undefined), DEFAULT_TONE));
 check('the default is the newest GPT, not Auto', () => assert.equal(DEFAULT_TONE, 'Gpt_5_6_Reasoning'));

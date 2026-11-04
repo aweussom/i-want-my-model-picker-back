@@ -18,6 +18,10 @@
         <select id="model-select" title="Maps to the tone field on the wire"></select>
         <button class="btn icon" id="browser-toggle"
                 title="Show or hide the Copilot browser doing the work">&#128065;</button>
+        <!-- Which account is actually signed in. A free consumer account and a
+             work tenant offer different model menus, and mistaking one for the
+             other reads as "Microsoft removed the models". -->
+        <span class="licence" id="licence-badge" hidden></span>
         <div class="status-dot" id="status-dot" title="checking..."></div>
     </div>
 </div>

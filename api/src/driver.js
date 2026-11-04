@@ -96,6 +96,10 @@ const toneMatches = (id, text) => {
 // the driver skip the picker and quietly answer as Auto.
 const BROWSER_DEFAULT_TONE = 'Magic';
 
+// Cloudflare Turnstile's own iframe host. Seen on the free consumer surface,
+// where every send raises a verification box; not seen on a work tenant.
+const CHALLENGE_FRAME_MARKER = 'challenges.cloudflare.com';
+
 /**
  * The newest named GPT, computed rather than hardcoded.
  *
@@ -439,7 +443,7 @@ class CopilotDriver {
     await this.page.goto(`https://m365.cloud.microsoft/chat/conversation/${id}`,
       { waitUntil: 'domcontentloaded' });
     const composer = await this._waitComposer(120);
-    if (!composer) throw new Error('conversation did not load a composer');
+    if (!composer) throw new Error(await this._composerLostReason());
     await this.page.waitForTimeout(1500);
     // The listing's tone if it had one (the DOM fallback never does). Otherwise
     // unknown until the next send, when the userscript reports what went out.
@@ -742,6 +746,65 @@ class CopilotDriver {
    * pure deltas, so the longest prefix per message id is tracked and only the
    * new tail is yielded.
    */
+  /**
+   * Is Copilot asking whether you are a human?
+   *
+   * Detected via the FRAME TREE, not the DOM. Turnstile renders its iframe into
+   * a shadow root, so `document.querySelectorAll('iframe')` finds nothing while
+   * the challenge fills the screen; `page.frames()` shows it plainly. The
+   * wrapper dialog is Microsoft's own Fluent component and its aria-label is
+   * localised ("Sikkerhetskontroll kreves" on a Norwegian tenant), so it is a
+   * fallback signal at best and never the test.
+   *
+   * This matters because the challenge swallows the send completely: the
+   * Chathub socket opens, handshakes, pings, and carries no invocation at all.
+   * Without this check that surfaces as `no completion frame before timeout`
+   * five minutes later, which reads like a broken driver and is not one.
+   */
+  /**
+   * Why is there no composer? "composer lost after reload" names the symptom
+   * and nothing else, which leaves you guessing between an expired session, a
+   * verification box, a dialog, and a genuinely slow page -- four problems with
+   * four different fixes. Ask the page before reporting.
+   */
+  async _composerLostReason() {
+    let url = '';
+    let title = '';
+    try { url = this.page.url() || ''; } catch { /* page may be gone */ }
+    try { title = await this.page.title(); } catch { /* ditto */ }
+
+    if (/login\.(microsoftonline|live)\.com|\/oauth2\/|[?&]sso_reload=/i.test(url)) {
+      let host = url;
+      try { host = new URL(url).host; } catch { /* keep the raw string */ }
+      return `the Copilot session has expired — the page is now ${host}. `
+           + 'Sign in again with: npm run signin';
+    }
+    if (this._challengeVisible()) {
+      return 'a human-verification box is covering the page, so the composer '
+           + 'never appeared and the prompt was never sent';
+    }
+    try {
+      const d = this.page.locator('[role="dialog"],[aria-modal="true"]').first();
+      if ((await d.count()) && (await d.isVisible())) {
+        const label = (await d.getAttribute('aria-label'))
+          || (await d.innerText().catch(() => '')) || '';
+        if (label) return `a dialog is covering the page: ${String(label).slice(0, 80)}`;
+      }
+    } catch { /* no dialog is the common case */ }
+
+    return `composer lost after reload (url=${url || 'unknown'}, `
+         + `title=${title || 'unknown'})`;
+  }
+
+  _challengeVisible() {
+    try {
+      return this.page.frames().some(
+        (f) => ((f.url && f.url()) || '').includes(CHALLENGE_FRAME_MARKER));
+    } catch {
+      return false;
+    }
+  }
+
   async *prompt(text, { tone = null, images = [], timeoutMs = 300_000 } = {}) {
     // Which tone goes into the frame.
     //
@@ -818,6 +881,15 @@ class CopilotDriver {
         await this.page.waitForTimeout(250);
       }
       if (!sent) {
+        // A Turnstile box swallows the send before any frame exists, so it
+        // lands here, not in the challenge handling further down. Name it.
+        if (this._challengeVisible()) {
+          throw new Error(this.headless
+            ? 'Copilot wants human verification, and the browser is hidden, so the '
+              + 'prompt was never sent. Show the browser and answer the box.'
+            : 'Copilot wants human verification; answer the box in the browser. '
+              + 'The prompt was never sent.');
+        }
         throw new Error(
           'userscript saw no chat frame within 15s of Enter. Either the prompt was '
           + 'not sent, or Copilot no longer sends chat over the Chathub WebSocket.',
@@ -833,10 +905,43 @@ class CopilotDriver {
       const emitted = new Map();
       const seenProgress = new Set();
       let gotAnswer = false;
+      let challenged = false;
+      let nextChallengeCheck = 0;
 
       for (;;) {
         const left = deadline - Date.now();
-        if (left <= 0) throw new Error('no completion frame before timeout');
+        if (left <= 0) {
+          // Name the real cause. Waiting five minutes and then blaming the
+          // completion frame sent a previous investigation looking for a broken
+          // observer when a verification box had simply eaten the send.
+          throw new Error(challenged || this._challengeVisible()
+            ? 'human verification was never completed, so the prompt was never sent'
+            : 'no completion frame before timeout');
+        }
+
+        // Cheap poll rather than per-iteration: the check walks the frame tree.
+        if (!gotAnswer && Date.now() >= nextChallengeCheck) {
+          nextChallengeCheck = Date.now() + 3000;
+          if (this._challengeVisible()) {
+            if (!challenged) {
+              challenged = true;
+              // A hidden browser makes this unanswerable rather than merely
+              // slow: the box needs a click, and there is no window to click
+              // in. Say that, instead of asking for an impossible action.
+              yield { kind: 'reasoning', value: this.headless
+                ? '[Copilot wants you to confirm you are a human, but the Copilot '
+                  + 'browser is hidden, so there is nothing to click. Show it with '
+                  + 'the eye icon and ask again — showing it starts a new '
+                  + 'conversation.]\n'
+                : '[Copilot is asking you to confirm you are a human — tick the box '
+                  + 'in the Copilot browser window]\n' };
+            }
+          } else if (challenged) {
+            challenged = false;
+            yield { kind: 'reasoning', value: '[verification cleared]\n' };
+          }
+        }
+
         const ev = await this._events.next(Math.min(left, 1000));
         if (!ev) continue;
 

@@ -81,6 +81,15 @@ body {
     background: var(--text-dim);
     flex-shrink: 0;
 }
+.licence {
+    font-size: 11px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
 .status-dot.ready { background: var(--success); }
 .status-dot.loading { background: #ff9800; }
 .status-dot.error { background: var(--error); }

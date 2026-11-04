@@ -249,7 +249,11 @@ class Recorder:
         phase = obj.get("phase", "?")
         url = str(obj.get("url", ""))
         entry = {"kind": "tap", "phase": phase, "url": redact_url(url)}
-        for key in ("method", "ctype", "index", "chunks", "error"):
+        # "from"/"to"/"noop"/"reason"/"sample" carry force_tone.js's report of
+        # what it rewrote. Dropping them would leave probe_tone.py unable to tell
+        # a working override from one that silently never fired.
+        for key in ("method", "ctype", "index", "chunks", "error",
+                    "from", "to", "noop", "reason", "sample"):
             if key in obj:
                 entry[key] = obj[key]
         for key in ("body", "chunk", "data"):
@@ -269,6 +273,10 @@ class Recorder:
                 print(f"\n*** PROMPT SENT #{self.chat_posts} -> {short}\n", flush=True)
             else:
                 print(f"--> [{phase}] {short}", flush=True)
+        elif phase == "tone-forced":
+            print(f"    [tone] {obj.get('from')!r} -> {obj.get('to')!r}", flush=True)
+        elif phase == "tone-force-failed":
+            print(f"    [tone] OVERRIDE FAILED: {obj.get('reason')}", flush=True)
         elif phase in ("stream-chunk", "xhr-chunk", "sse"):
             self.stream_chunks += 1
             body = str(obj.get("chunk") or obj.get("data") or "")
@@ -319,7 +327,6 @@ def main() -> int:
             user_data_dir=str(profile_dir),
             headless=False,
             viewport={"width": 1500, "height": 950},
-            args=["--disable-blink-features=AutomationControlled"],
         )
         # The in-page tap must be installed before any application script runs,
         # so both of these happen before the first navigation.
@@ -371,6 +378,13 @@ def main() -> int:
         context.on("page", attach)
 
         page.goto(args.url, wait_until="domcontentloaded")
+        # Launched from a terminal, the window opens behind it and is easy to
+        # miss entirely -- especially when a firewall prompt steals focus first,
+        # which looks exactly like nothing having happened.
+        try:
+            page.bring_to_front()
+        except Exception:
+            pass
 
         deadline = time.monotonic() + args.seconds
         try:

@@ -68,9 +68,12 @@ TONES: dict[str, dict[str, str]] = {
         "title": "GPT 5.6 Think deeper",
         "owned_by": "openai",
     },
-    "Gpt_5_5_Chat": {
-        "label": "GPT 5.5 Quick response",
-        "title": "GPT 5.5 Quick response",
+    # Was Gpt_5_5_Chat until 2026-09-15, when this tenant's
+    # modelSelectorMetadata showed 5.5 replaced by 5.6. Old threads on 5.5 still
+    # open; the menu just stopped offering it. The values outlive the buttons.
+    "Gpt_5_6_Chat": {
+        "label": "GPT 5.6 Quick response",
+        "title": "GPT 5.6 Quick response",
         "owned_by": "openai",
     },
 }
@@ -428,7 +431,6 @@ class CopilotDriver:
                     user_data_dir=self._profile,
                     headless=self._headless,
                     viewport={"width": 1500, "height": 950},
-                    args=["--disable-blink-features=AutomationControlled"],
                 )
                 page = context.pages[0] if context.pages else context.new_page()
                 self._attach(page)
