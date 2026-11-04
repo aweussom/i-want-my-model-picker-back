@@ -11,6 +11,7 @@ npx playwright install chromium     # optional; it prefers Chrome or Edge
 npm run signin                      # sign in once; waits 15 minutes
 npm run serve                       # API on http://127.0.0.1:8791
 npm test                            # unit checks, no browser needed
+python smoke_test.py                # against the running API: 2 real prompts, checks the tone on the wire
 ```
 
 `COPILOT_PROFILE` picks the profile directory, so keep work and personal apart.
@@ -24,6 +25,7 @@ npm test                            # unit checks, no browser needed
 | `src/server.js` | `node:http`: test UI, `/health`, `/v1/models`, `/v1/chat/completions` |
 | `src/signin.js` | Opens a browser and waits for you to log in |
 | `src/*.spec.js` | Unit checks for the pure parts |
+| `smoke_test.py` | End-to-end check over HTTP, standard-library Python, no Playwright |
 | `src/probe-history.js`, `src/cleanup-tests.js` | Research and cleanup tools |
 
 The test UI at `/` is `../templates` and `../static`, inherited from the archived
