@@ -1,10 +1,12 @@
 // ==UserScript==
 // @name         i want my model picker back (overlay)
 // @namespace    https://github.com/aweussom/i-want-my-model-picker-back
-// @version      20261104-125409
+// @version      20261104-151151
 // @description  Forces the best GPT reasoning model on every M365 Copilot chat message, whatever Microsoft's picker says. No interaction needed.
 // @match        https://m365.cloud.microsoft/*
 // @match        https://copilot.cloud.microsoft/*
+// @updateURL    https://raw.githubusercontent.com/aweussom/i-want-my-model-picker-back/main/userscript/model-picker.user.js
+// @downloadURL  https://raw.githubusercontent.com/aweussom/i-want-my-model-picker-back/main/userscript/model-picker.user.js
 // @run-at       document-start
 // @grant        none
 // @sandbox      raw
@@ -38,7 +40,7 @@
   "use strict";
 
   // Keep in step with @version above; both are stamped by the same edit.
-  const VERSION = "20261104-125409";
+  const VERSION = "20261104-151151";
   const TAG = "[model-picker-overlay]";
   // New key on purpose: the earlier dropdown version stored explicit picks
   // under "mpo.tone", and an old pick must not pin a browser below "best".
