@@ -302,9 +302,9 @@ if (require.main === module) {
       process.exit(1);
     }
     console.log('starting browser...');
-    // Honour COPILOT_PROFILE the way main.js does. Without it the standalone
-    // server could only ever drive electron/.profile, so testing against a
-    // second account meant editing this file.
+    // COPILOT_PROFILE points at another signed-in profile, so a second account
+    // can be tested without editing this file. Unset, the driver uses
+    // api/.profile.
     const profileDir = process.env.COPILOT_PROFILE
       ? path.resolve(process.env.COPILOT_PROFILE)
       : undefined;
