@@ -14,17 +14,30 @@
  * pump to starve, and the bug is not expressible. What is left is an event
  * emitter and an async generator.
  *
- * Everything else is the same hard-won detail: the composer is a <span> with
- * role="textbox", named models sit behind a submenu that opens on HOVER, `tone`
- * is per conversation, and uploads bind to the conversation server-side.
+ * Model selection does NOT touch Microsoft's picker any more. The driver injects
+ * ../../userscript/model-picker.user.js, the same file people install in
+ * Tampermonkey, and tells it which `tone` to write into the outgoing chat frame
+ * via window.__mpo. The old way opened the menu, hovered a provider submenu and
+ * matched localised labels; it broke every time Microsoft renamed an entry (the
+ * "GPT-5.6 Sol" rename of Nov 2026 broke it silently). The wire field has not
+ * changed since it was found.
+ *
+ * Still true: the composer is a <span> with role="textbox", and uploads bind to
+ * the conversation server-side.
  */
 
 const path = require('path');
 const os = require('os');
 const fs = require('fs/promises');
+const fsSync = require('fs');
 const { chromium } = require('playwright');
 
 const CHAT_URL = 'https://m365.cloud.microsoft/chat';
+
+// The userscript lives at the repo root, two levels up from api/src. One copy,
+// shared with Tampermonkey users; _afterLaunch() fails loudly if it is missing.
+const USERSCRIPT_CANDIDATE = path.join(__dirname, '..', '..', 'userscript', 'model-picker.user.js');
+const USERSCRIPT_PATH = fsSync.existsSync(USERSCRIPT_CANDIDATE) ? USERSCRIPT_CANDIDATE : null;
 
 // Discovered by asking the DOM, not by guessing. Match on role and
 // contenteditable, which do not change with UI language.
@@ -35,38 +48,14 @@ const COMPOSER_SELECTORS = [
   '[contenteditable="true"]',
 ];
 
-// The picker button's accessible name is localized -- "Modellvelger" in
-// Norwegian, "Model selector" in English -- and its inner text is the current
-// selection.
+// The tone values the API offers as `model`. Keys are wire values, which is all
+// the driver needs now. `labels` are only aliases for server.js resolveTone(), so
+// a caller may send the menu label instead of the wire value; they no longer
+// drive any clicking, so a stale label costs an alias, not a broken request.
 //
-// There used to be a bare `button[aria-haspopup]` as a last resort. That is far
-// too broad: it matches every popup button on the page, and on an account where
-// the real picker is absent it happily selected the overflow menu on a chat in
-// the history sidebar (aria-label="Mer", class fui-SplitNavItem__menuButton).
-// Clicking that then failed because the nav link's subtree intercepts pointer
-// events, and the exception surfaced as a chat error. A selector that can match
-// the wrong thing is worse than one that matches nothing.
-const PICKER_SELECTORS = [
-  '[aria-label*="odellvelger" i]',
-  '[aria-label*="model selector" i]',
-  '[aria-label*="modellvelg" i]',
-];
-
-// The trigger's text is the current tone's label, so it doubles as confirmation
-// that we found the right button. Localised, hence the aliases below.
-const PICKER_TEXT_HINTS = [
-  'auto', 'automatisk',
-  'quick response', 'raskt svar',
-  'think deeper', 'tenk dypere',
-  'gpt',
-];
-
-// `labels` are what the menu entry reads, and Copilot localises them. This laptop
-// renders the entries in English while the surrounding chrome is Norwegian;
-// another machine on the same product renders them fully translated. Matching on
-// one language quietly finds nothing on the other, so every tone carries its
-// aliases. Add more as they turn up -- a missing alias degrades to "this account
-// does not offer that tone", which is wrong but harmless.
+// Gpt_5_6_Reasoning and Gpt_5_6_Chat were read off the wire on 2026-11-04 with
+// the userscript set to Off. Gpt_5_5_Chat had left the menu by then and is
+// untested since; kept because values have outlived their buttons before.
 const TONES = {
   Magic: {
     labels: ['Auto', 'Automatisk'],
@@ -80,19 +69,19 @@ const TONES = {
     labels: ['Think deeper', 'Tenk dypere'],
     title: 'Think deeper', ownedBy: 'microsoft',
   },
-  // Named models carry a second name. The *menu* entry reads "GPT 5.6 Think
-  // deeper"; the picker button, once selected, shows the shortTitle "GPT 5.6
-  // Think". Both are needed: the long form to find the entry, the short form to
-  // read back what is currently selected. Missing the short form made
-  // readCurrentTone() return null for exactly the named models -- so selection
-  // worked and verification silently disagreed.
   Gpt_5_6_Reasoning: {
-    labels: ['GPT 5.6 Think deeper', 'GPT 5.6 Tenk dypere', 'GPT 5.6 Think'],
-    title: 'GPT 5.6 Think deeper', ownedBy: 'openai',
+    labels: ['GPT-5.6 Sol Think deeper', 'GPT 5.6 Sol Think', 'GPT 5.6 Think deeper',
+      'GPT 5.6 Tenk dypere', 'GPT 5.6 Think'],
+    title: 'GPT-5.6 Sol Think deeper', ownedBy: 'openai',
+  },
+  Gpt_5_6_Chat: {
+    labels: ['GPT-5.6 Sol Quick response', 'GPT 5.6 Sol Quick', 'GPT 5.6 Quick response',
+      'GPT 5.6 Raskt svar'],
+    title: 'GPT-5.6 Sol Quick response', ownedBy: 'openai',
   },
   Gpt_5_5_Chat: {
     labels: ['GPT 5.5 Quick response', 'GPT 5.5 Raskt svar', 'GPT 5.5 Quick'],
-    title: 'GPT 5.5 Quick response', ownedBy: 'openai',
+    title: 'GPT 5.5 Quick response (no longer in the menu)', ownedBy: 'openai',
   },
 };
 
@@ -217,9 +206,16 @@ class CopilotDriver {
     this.channel = channel;          // null = try chrome, then msedge, then bundled
     this.usingChannel = null;
     this.sandboxEnabled = null;
-    this.availableTones = null;   // filled by discoverTones() at startup
+    // Always null now. It used to be filled by clicking through the menu; the
+    // menu is no longer touched, and the model list is not in the page's
+    // hydration data [OBSERVED 2026-11-04]. null means "not discovered", and
+    // server.js then offers every entry in TONES.
+    this.availableTones = null;
     this._conversationPinned = false;   // true while continuing a reopened thread
-    this.currentTone = BROWSER_DEFAULT_TONE;   // what a fresh conversation is on
+    // The tone of the last chat frame that went out, as reported by the
+    // userscript. Before any send it is what a fresh conversation is on; after
+    // reopening a thread it is null until the next send reports it.
+    this.currentTone = BROWSER_DEFAULT_TONE;
     this.socketUrl = null;
     this.ready = false;
     this._events = new EventQueue();
@@ -269,7 +265,6 @@ class CopilotDriver {
         try { await this.context.close(); } catch { /* already gone */ }
         this.ready = false;
         this.socketUrl = null;
-        this.availableTones = null;
       }
     }
 
@@ -320,49 +315,6 @@ class CopilotDriver {
   }
 
   /**
-   * Open the model picker menu, and be sure it is actually open.
-   *
-   * The trigger is a toggle. Clicking it blindly is a coin flip: if a previous
-   * call left the menu open -- an Escape that did not land, a hover that kept it
-   * alive -- the click *closes* it, and the caller then reads an empty menu and
-   * concludes the account offers no models. That is exactly how tone discovery
-   * came back NULL on every other attempt.
-   *
-   * `aria-expanded` on the trigger is the authoritative state, so use it rather
-   * than assuming.
-   */
-  async _openPickerMenu(trigger) {
-    const expanded = async () => (await trigger.getAttribute('aria-expanded')) === 'true';
-
-    if (await expanded()) {
-      try { await this.page.keyboard.press('Escape'); } catch { /* ignore */ }
-      await this.page.waitForTimeout(400);
-    }
-
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        await trigger.click({ timeout: 5000 });
-      } catch {
-        return false;
-      }
-      await this.page.waitForTimeout(2500);   // the menu takes well over a second
-      if (await expanded()) return true;
-      // Closed rather than opened: we toggled the wrong way. Try once more.
-      await this.page.waitForTimeout(500);
-    }
-    return false;
-  }
-
-  async _closePickerMenu(trigger) {
-    try {
-      if ((await trigger.getAttribute('aria-expanded')) === 'true') {
-        await this.page.keyboard.press('Escape');
-        await this.page.waitForTimeout(300);
-      }
-    } catch { /* nothing to close */ }
-  }
-
-  /**
    * The conversation the browser is currently in, or null for an unsent new chat.
    *
    * Copilot navigates to /chat/conversation/<id> once a thread exists, so the URL
@@ -377,26 +329,6 @@ class CopilotDriver {
     const fromSocket = this.socketUrl
       && /[?&]ConversationId=([0-9a-f-]{16,})/i.exec(this.socketUrl);
     return fromSocket ? fromSocket[1] : null;
-  }
-
-  /**
-   * Which tone the page is currently showing.
-   *
-   * The picker trigger's visible text *is* the current selection, so this reads
-   * the live state rather than trusting what we last set. Locale-aware via the
-   * tone aliases, which is why it survives a Norwegian UI.
-   */
-  async readCurrentTone() {
-    const trigger = await this._findPickerTrigger();
-    if (!trigger) return null;
-    const text = await trigger.innerText().catch(() => '');
-    if (!text) return null;
-    // Longest label first, so "GPT 5.6 Think deeper" wins over "Think deeper".
-    const ids = Object.keys(TONES).sort(
-      (a, b) => Math.max(...TONES[b].labels.map((l) => l.length))
-              - Math.max(...TONES[a].labels.map((l) => l.length)),
-    );
-    return ids.find((id) => toneMatches(id, text)) || null;
   }
 
   /**
@@ -484,10 +416,9 @@ class CopilotDriver {
   /**
    * Open an existing conversation so the next prompt continues it.
    *
-   * Navigating restores it server-side, which matters more than it sounds: `tone`
-   * is a property of the conversation, so reopening an old thread also restores
-   * the model it was using. currentTone is set from the listing when known, so
-   * the driver does not then "helpfully" reset the picker.
+   * Navigating restores it server-side, and the page's own picker comes back on
+   * the thread's stored tone. A prompt with no model then leaves the override
+   * off, so the thread keeps that tone; see prompt().
    */
   async openConversation(id, { tone = null } = {}) {
     let release;
@@ -510,11 +441,11 @@ class CopilotDriver {
     const composer = await this._waitComposer(120);
     if (!composer) throw new Error('conversation did not load a composer');
     await this.page.waitForTimeout(1500);
-    // Prefer what the page says over what the listing claimed: the picker
-    // trigger's own text is the live truth, and the sidebar fallback carries no
-    // tone at all.
-    this.currentTone = (await this.readCurrentTone())
-      || (tone && TONES[tone] ? tone : BROWSER_DEFAULT_TONE);
+    // The listing's tone if it had one (the DOM fallback never does). Otherwise
+    // unknown until the next send, when the userscript reports what went out.
+    // Reading the picker button's label used to fill this in; labels change,
+    // and that is the fragility this refactor removed.
+    this.currentTone = tone && TONES[tone] ? tone : null;
     this._conversationPinned = true;
     // The transcript is in the page already; handing it back means the caller can
     // show the thread instead of an empty pane that looks like a loss.
@@ -551,7 +482,6 @@ class CopilotDriver {
       try { await this.context.close(); } catch { /* already gone */ }
       this.ready = false;
       this.socketUrl = null;
-      this.availableTones = null;
       this.currentTone = BROWSER_DEFAULT_TONE;
       this._conversationPinned = false;
       this.headless = !visible;
@@ -578,6 +508,18 @@ class CopilotDriver {
     this._attach(this.page);
     this.context.on('page', (p) => this._attach(p));
 
+    // The userscript must be in place before Copilot's own code runs, because
+    // it patches WebSocket.prototype.send. addInitScript runs on every
+    // navigation in this context, ahead of page scripts.
+    if (!USERSCRIPT_PATH) {
+      throw new Error(
+        'userscript/model-picker.user.js not found next to the app or in resources/. '
+        + 'Model selection depends on it; a build without it cannot pick a model.',
+      );
+    }
+    console.log(`[driver] injecting ${USERSCRIPT_PATH} so tone can be set on the wire`);
+    await this.context.addInitScript({ path: USERSCRIPT_PATH });
+
     await this.page.goto(this.url, { waitUntil: 'domcontentloaded' });
     const composer = await this._waitComposer(Math.ceil(signInTimeoutMs / 500), onWait);
     if (!composer) {
@@ -587,7 +529,19 @@ class CopilotDriver {
       );
     }
     await this.page.waitForTimeout(2000);
-    this.availableTones = await this.discoverTones();
+
+    // Fail here, at startup, rather than on the first prompt.
+    const hookVersion = await this.page.evaluate(
+      () => (window.__mpo ? window.__mpo.version : null),
+    );
+    if (!hookVersion) {
+      throw new Error(
+        'userscript loaded but window.__mpo is missing in the page. '
+        + 'Either the init script did not run, or the file predates the hook.',
+      );
+    }
+    console.log(`[driver] userscript hook present, v${hookVersion}`);
+
     this._tmpdir = this._tmpdir || await fs.mkdtemp(path.join(os.tmpdir(), 'copilot-wire-'));
     this.ready = true;
     return this;
@@ -596,11 +550,10 @@ class CopilotDriver {
   /**
    * Launch a browser, preferring one the machine already has.
    *
-   * A packaged build cannot assume Playwright's own Chromium: it lives in
-   * %LOCALAPPDATA%\ms-playwright and is put there by `playwright install`, which
-   * an installer user never runs. Driving installed Chrome or Edge instead means
-   * the .exe works on a clean Windows box with no 150MB browser download, and
-   * Edge is always present. Falls back to the bundled Chromium for dev checkouts.
+   * Playwright's own Chromium lives in %LOCALAPPDATA%\ms-playwright and only
+   * exists after `npx playwright install`. Driving installed Chrome or Edge
+   * instead skips a 150MB download, and Edge is always present on Windows.
+   * Falls back to the bundled Chromium if neither launches.
    */
   async _launch() {
     const opts = {
@@ -728,161 +681,15 @@ class CopilotDriver {
     return null;
   }
 
-  async _findPickerTrigger() {
-    for (const sel of PICKER_SELECTORS) {
-      const el = this.page.locator(sel).first();
-      try {
-        if ((await el.count()) && (await el.isVisible())) return el;
-      } catch { /* keep looking */ }
-    }
-    // Nothing matched by accessible name. Rather than reach for a generic
-    // popup button -- which is how the sidebar's overflow menu got clicked --
-    // look for a button whose visible text is a tone label, and require it to
-    // be outside the navigation. If that finds nothing, we have no picker, and
-    // saying so is the correct answer.
-    try {
-      const buttons = await this.page.locator('button:not(nav button)').all();
-      for (const b of buttons) {
-        const text = ((await b.innerText().catch(() => '')) || '')
-          .split(/\s+/).join(' ').toLowerCase();
-        if (!text || text.length > 30) continue;
-        if (PICKER_TEXT_HINTS.some((h) => text.includes(h)) && await b.isVisible()) {
-          return b;
-        }
-      }
-    } catch { /* fall through */ }
-    return null;
-  }
-
   /**
-   * Ask the page which tones this account actually offers.
-   *
-   * The menu is not the same everywhere. A work tenant on licenseType=Starter
-   * shows the generic modes *and* named models (GPT 5.6 Think deeper, GPT 5.5
-   * Quick response). A personal Microsoft account shows only the generic three:
-   * Auto, Quick response, Think deeper. Hardcoding the tone map meant the app
-   * confidently offered GPT 5.6 on accounts that have never had it, failed to
-   * find the menu entry, and silently answered as Auto instead.
-   *
-   * So: enumerate the real menu and match against known labels. Anything not on
-   * screen is not offered.
+   * Newest GPT in TONES. No longer per-account: nothing discovers what an
+   * account offers now, so a personal account (which showed only the three
+   * generic modes) will be asked for a GPT tone too. What the server does with
+   * a tone the account does not have is untested; a rejection surfaces as a
+   * driver error, a silent downgrade would not be visible.
    */
-  async discoverTones() {
-    const trigger = await this._findPickerTrigger();
-    if (!trigger) return null;
-    try {
-      if (!(await this._openPickerMenu(trigger))) return null;
-
-      const seen = new Set();
-      const collect = async () => {
-        for (const role of ['menuitemradio', 'menuitem', 'option']) {
-          let all = [];
-          try { all = await this.page.getByRole(role).all(); } catch { continue; }
-          for (const it of all) {
-            try {
-              if (await it.isVisible()) {
-                seen.add(((await it.innerText()) || '').split(/\s+/).join(' '));
-              }
-            } catch { /* skip */ }
-          }
-        }
-      };
-      await collect();
-      // Named models hide behind a provider submenu that opens on hover.
-      for (const role of ['menuitem']) {
-        let all = [];
-        try { all = await this.page.getByRole(role).all(); } catch { continue; }
-        for (const it of all) {
-          try {
-            const t = ((await it.innerText()) || '').toLowerCase();
-            if (!/gpt|openai|claude|anthropic/.test(t)) continue;
-            await it.hover();
-            await this.page.waitForTimeout(1800);
-            await collect();
-          } catch { /* skip */ }
-        }
-      }
-      await this._closePickerMenu(trigger);
-
-      const menu = [...seen].join(' || ').toLowerCase();
-      const available = Object.keys(TONES).filter((id) => toneMatches(id, menu));
-      return available.length ? available : null;
-    } catch {
-      await this._closePickerMenu(trigger);
-      return null;
-    }
-  }
-
-  /** Best tone this account actually has: newest GPT, else the deepest generic. */
   get defaultTone() {
-    const pool = this.availableTones && this.availableTones.length
-      ? Object.fromEntries(this.availableTones.map((id) => [id, TONES[id]]))
-      : TONES;
-    const gpt = highestGptTone(pool);
-    if (gpt !== BROWSER_DEFAULT_TONE) return gpt;
-    for (const fallback of ['Reasoning', 'Chat', 'Magic']) {
-      if (pool[fallback]) return fallback;
-    }
-    return BROWSER_DEFAULT_TONE;
-  }
-
-  async _selectTone(tone) {
-    if (!TONES[tone]) return false;
-    if (this.availableTones && !this.availableTones.includes(tone)) return false;
-
-    const trigger = await this._findPickerTrigger();
-    if (!trigger) return false;
-
-    // A failure here must not take the turn down with it: on an account with no
-    // picker at all, this is expected, and the caller degrades to the current tone.
-    if (!(await this._openPickerMenu(trigger))) return false;
-
-    const items = async () => {
-      const out = [];
-      for (const role of ['menuitemradio', 'menuitem', 'option']) {
-        let all = [];
-        try { all = await this.page.getByRole(role).all(); } catch { continue; }
-        for (const it of all) {
-          try {
-            if (await it.isVisible()) {
-              out.push({ it, role, text: ((await it.innerText()) || '').split(/\s+/).join(' ') });
-            }
-          } catch { /* skip */ }
-        }
-      }
-      return out;
-    };
-
-    const clickMatch = async (list) => {
-      for (const { it, text } of list) {
-        if (toneMatches(tone, text)) {
-          try {
-            await it.click({ timeout: 5000 });
-            await this.page.waitForTimeout(900);
-            return true;
-          } catch { /* try the next */ }
-        }
-      }
-      return false;
-    };
-
-    const top = await items();
-    if (await clickMatch(top)) return true;
-
-    // Named models sit behind a provider submenu that opens on HOVER.
-    // Clicking the parent collapses it and loses the nested entries.
-    for (const { it, role, text } of top) {
-      if (role !== 'menuitem') continue;
-      if (!/gpt|openai|claude|anthropic/i.test(text)) continue;
-      try {
-        await it.hover();
-        await this.page.waitForTimeout(2200);
-      } catch { continue; }
-      if (await clickMatch(await items())) return true;
-    }
-
-    await this._closePickerMenu(trigger);
-    return false;
+    return highestGptTone(TONES);
   }
 
   /**
@@ -936,14 +743,25 @@ class CopilotDriver {
    * new tail is yielded.
    */
   async *prompt(text, { tone = null, images = [], timeoutMs = 300_000 } = {}) {
-    // An unspecified model means "whatever this conversation is on", not "my
-    // preferred default". That distinction only shows up once you can reopen an
-    // old thread: the default would differ from the thread's tone, the tone-change
-    // path would navigate to the base chat URL to reach the picker, and the
-    // conversation you just reopened would be silently abandoned. The default
-    // applies to *new* conversations.
-    if (!tone) tone = this._conversationPinned ? this.currentTone : this.defaultTone;
-    else this._conversationPinned = false;   // an explicit switch starts a new thread
+    // Which tone goes into the frame.
+    //
+    // An explicit model is sent as asked, in the current thread. Changing tone no
+    // longer starts a new chat: the server stores the latest tone per message
+    // [OBSERVED 2026-11-04, a Magic thread reopened as GPT 5.6 Sol Think after
+    // one rewritten message], so there is nothing to reload for.
+    //
+    // No model on a reopened thread means "keep what this thread is on": the
+    // tone of our last send if we know it, otherwise "" which switches the
+    // override off and lets the page's own picker, restored to the thread's
+    // tone on load, decide. No model on a fresh chat means our default.
+    let toneToSend;
+    if (tone) {
+      toneToSend = tone;
+    } else if (this._conversationPinned) {
+      toneToSend = this.currentTone || '';
+    } else {
+      toneToSend = this.defaultTone;
+    }
     // Serialise turns: one browser, one conversation.
     let release;
     const mine = new Promise((r) => { release = r; });
@@ -957,18 +775,17 @@ class CopilotDriver {
     try {
       this._events.clear();
 
-      // tone is per conversation, so a change needs a fresh chat.
-      if (tone !== this.currentTone) {
-        await this.page.goto(this.url, { waitUntil: 'domcontentloaded' });
-        if (!(await this._waitComposer())) throw new Error('composer lost after reload');
-        await this.page.waitForTimeout(2500);
-        if (await this._selectTone(tone)) {
-          this.currentTone = tone;
-        } else {
-          emit({ kind: 'progress', value: `[could not select ${tone}; using current]\n` });
-          this.currentTone = BROWSER_DEFAULT_TONE;   // what a fresh conversation is on
+      // Set the override every turn, not only on change: a full navigation
+      // re-runs the userscript, which then starts from whatever localStorage
+      // holds, and that may be what a human last picked in the box.
+      console.log(`[driver] setting userscript tone to ${toneToSend || '(off)'} for this send`);
+      const sendsBefore = await this.page.evaluate((t) => {
+        if (!window.__mpo) {
+          throw new Error('userscript hook window.__mpo missing; was it injected?');
         }
-      }
+        window.__mpo.setTone(t);
+        return window.__mpo.sendCount;
+      }, toneToSend);
 
       if (images.length) await this._attachImages(images, emit);
 
@@ -985,6 +802,32 @@ class CopilotDriver {
       }
       await composer.type(text, { delay: 8 });
       await this.page.keyboard.press('Enter');
+
+      // Confirm the frame went out through the userscript with our tone. Without
+      // this, a page that changed its transport would answer as Auto and look
+      // like success. The Chathub socket opens lazily on the first send, so the
+      // first turn needs a few seconds.
+      console.log('[driver] waiting for the userscript to report the chat frame, expecting it within 15s');
+      let sent = null;
+      for (let i = 0; i < 60; i++) {
+        sent = await this.page.evaluate(
+          (n) => (window.__mpo && window.__mpo.sendCount > n ? window.__mpo.lastSend : null),
+          sendsBefore,
+        );
+        if (sent) break;
+        await this.page.waitForTimeout(250);
+      }
+      if (!sent) {
+        throw new Error(
+          'userscript saw no chat frame within 15s of Enter. Either the prompt was '
+          + 'not sent, or Copilot no longer sends chat over the Chathub WebSocket.',
+        );
+      }
+      if (toneToSend && sent.sent !== toneToSend) {
+        throw new Error(`userscript sent tone ${sent.sent}, expected ${toneToSend}`);
+      }
+      console.log(`[driver] tone on the wire: ${sent.before} -> ${sent.sent}`);
+      this.currentTone = sent.sent;
 
       const deadline = Date.now() + timeoutMs;
       const emitted = new Map();

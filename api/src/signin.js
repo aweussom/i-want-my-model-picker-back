@@ -36,8 +36,7 @@ function arg(name, fallback) {
       onWait: (s) => process.stdout.write(`\r  waiting for the composer... ${s}s `),
     });
     console.log(`\r  signed in. The profile now holds a session.        `);
-    console.log(`\nNext:  npm start          (the app)`);
-    console.log(`       npm run serve      (API only, port 8791)`);
+    console.log(`\nNext:  npm run serve      (API on port 8791)`);
   } catch (e) {
     console.error(`\n${e.message}`);
     process.exitCode = 1;

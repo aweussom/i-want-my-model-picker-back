@@ -16,11 +16,11 @@ __pycache__/
 # Article draft: kept locally, not published here.
 devto-post.md
 
-# Launcher artefacts
+# Launcher artefacts of the archived Python app
 .appwindow/
 logs/
 
 # Node
 node_modules/
-electron/dist/
+api/dist/
 package-lock.json

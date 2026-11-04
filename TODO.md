@@ -7,8 +7,6 @@
   then sit for 90s waiting for a second that never arrives. Verify before
   claiming multi-image support anywhere.
 
-- Remove the dead `SENTINEL_DONE` constant in `driver.py`.
-
 - **Whether a free personal account can reach this surface is unresolved.** It
   showed an upsell wall ("Oppgrader Microsoft 365 til a bruke Copilot Chat") on one
   sign-in and worked on the next, with nothing bought in between and only the three
@@ -25,7 +23,7 @@
   there at all. That is a separate investigation, and possibly a better one to
   publish from.
 
-- `driver.py` has no cancel path into the browser. `/v1/cancel` sets a flag that
+- `api/src/driver.js` has no cancel path into the browser. `/v1/cancel` sets a flag that
   stops the generator, but Copilot keeps generating in the page. Wire it to the
   stop button.
 
@@ -50,3 +48,12 @@
   (`--dry-run` first). Deletion goes through the sidebar overflow menu, whose items
   are localised: "Gi nytt navn", "Legg til i notatblokk", "Slett". Prefer a
   throwaway prompt you can recognise later over "hi".
+
+- What does the server do with a tone the account does not have? The API no
+  longer discovers per-account tones, so a personal account (menu showed only
+  Auto / Quick response / Think deeper) gets asked for `Gpt_5_6_Reasoning` too.
+  A rejection would surface as a driver error; a silent downgrade would not.
+  Send one prompt on a personal profile and read `/health` and the reply.
+
+- `run_probe.py` selects by menu label and has not been rerun since the
+  "GPT-5.6 Sol" rename of 2026-11-04.

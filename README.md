@@ -1,120 +1,89 @@
 # i want my model picker back
 
-An OpenAI-compatible endpoint for Microsoft 365 Copilot in which `model` actually
-does something.
+Microsoft 365 Copilot always gets the best model, whatever Microsoft's picker says.
 
-Copilot's GUI has a model picker. Microsoft's official Copilot Chat API has no
-model parameter. Microsoft is also deleting the picker. This works out what the
-web client sends when you touch that dropdown, and puts an API in front of it.
+The GUI has a model picker. Microsoft's official Copilot Chat API has no model parameter. And Microsoft keeps shrinking the picker. I worked out what the web client sends when you touch that dropdown. It is one field. This repo sets it for you, two ways:
 
-### ⬇ [Download the Windows installer](https://github.com/aweussom/i-want-my-model-picker-back/releases/latest)
+1. A browser userscript. Install it and forget it. Start here.
+2. An OpenAI-compatible API, for scripts and SDK clients. Same userscript under the hood.
 
-Unsigned, so SmartScreen will object — build it yourself from `electron/` if that
-bothers you, which is a reasonable position for a tool that drives your Microsoft
-session. Everything below is how it works and how it was found.
+> A light-hearted write-up of how I worked this out, including where I confidently published the wrong answer, is coming to dev.to. Link goes here once it is live.
 
-> A light-hearted write-up of how this was worked out — including the part where I
-> confidently published the wrong answer — is coming to dev.to.
-> *(Link goes here once it is live.)*
+**What this does not fix.** Nothing here removes the business harness. The chat payload carries 34 `optionsSets` flags and 31 permitted message types, and GPT 5.6 arrives at your question already wearing enterprise search grounding, a sanitiser, citation rewriting, a plugin dispatcher, and a flag named `cdxgrounding_api_v2_rich_web_answers_reference_bottom_force`. All of that stays. The only thing that changes is **which** model gets thrown overboard wearing it.
 
-**What this does not fix.** Nothing here removes the business harness. The chat
-payload carries 34 `optionsSets` flags and 31 permitted message types, and GPT 5.6
-arrives at your question already wearing enterprise search grounding, a sanitiser,
-citation rewriting, a plugin dispatcher, and a flag named
-`cdxgrounding_api_v2_rich_web_answers_reference_bottom_force`. All of that stays.
-The only thing that changes is **which** model gets thrown overboard wearing it.
+## The userscript
 
----
+[`userscript/model-picker.user.js`](userscript/model-picker.user.js). Install with Tampermonkey or Violentmonkey: create a new script, paste the file in, save, reload Copilot. It matches `m365.cloud.microsoft` and `copilot.cloud.microsoft`.
 
-## Getting started
+Nothing to set. Every message goes out on the best reasoning model the script knows, today `Gpt_5_6_Reasoning` ("GPT-5.6 Sol Think deeper" in Microsoft's menu). A small badge in the corner says what it is forcing. It is click-through, so it never covers anything.
+
+If Microsoft ships something newer and you pick it once in their menu, the script sees a higher `Gpt_<major>_<minor>_Reasoning` go out, adopts it as the new best, and remembers it. No edit needed.
+
+How it works: it wraps `WebSocket.prototype.send`, finds the chat invocation on the Chathub socket, and replaces one field, `arguments[0].tone`. Everything else goes out byte for byte. Microsoft's menu keeps showing its own label, because the script never touches it.
+
+From the browser console, `__mpo.setTone("")` turns the override off and `__mpo.setTone("best")` turns it back on. With it off, the script still reports which `tone` Microsoft's picker sent. That is how I found the new values without guessing.
+
+What I have checked, on 4 November 2026, on a work tenant:
+
+- The rewrite goes out: the console logs `Magic -> Gpt_5_6_Reasoning` on send.
+- The server keeps it: a chat sent with Microsoft's menu on Auto and the script on `Gpt_5_6_Reasoning` reopens with the menu showing "GPT 5.6 Think". The app can only have got that value from the rewritten frame.
+- It also works mid-conversation. A thread whose first message went out as `Magic` got one more message rewritten to `Gpt_5_6_Reasoning`. After switching to another chat and back, the menu showed "GPT 5.6 Sol Think" for it. The menu does not update live; it reads the stored value when the thread loads.
+
+The console says what it is doing, prefixed `[model-picker-overlay]`. If there is no `loaded` line, the script was not injected into the page. If it loads but never logs a send, Copilot has changed its transport and the script is doing nothing.
+
+## The API
+
+For when you need `/v1/chat/completions`. Node and Playwright drive a real, signed-in browser and inject the userscript into it. The model you ask for goes straight into `tone`. Microsoft's menu is never clicked, so a menu redesign does not break it.
 
 ```powershell
 git clone https://github.com/aweussom/i-want-my-model-picker-back
-cd i-want-my-model-picker-back
+cd i-want-my-model-picker-back\api
+npm install
 
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install playwright flask
-.\.venv\Scripts\python.exe -m playwright install chromium
+npm run signin      # once per profile; a browser opens, log in
+npm run serve       # http://127.0.0.1:8791
 ```
-
-**1. Sign in once.** A real Chromium opens; log into Copilot. The profile
-persists, so you only do this once per account.
-
-```powershell
-.\.venv\Scripts\python.exe capture.py --label signin --seconds 300
-```
-
-Use a separate profile per account — keep work and personal apart:
-
-```powershell
-.\.venv\Scripts\python.exe capture.py --label signin --profile .profile-personal --seconds 300
-```
-
-**2. Run it as an app.** `app.bat` starts the server, waits for it to actually be
-ready, and opens the UI in a Chromium `--app` window — no address bar, no tabs,
-its own taskbar entry. Closing the window shuts the server down.
-
-```powershell
-.\app.bat                              # or double-click it
-.\app.bat -KeepServer                  # leave the server up afterwards
-.\app.bat -ProfileDir .profile-personal
-```
-
-No new dependencies: it uses whichever Chromium-family browser you already have,
-falling back Chrome → Edge → Playwright's own. Expect **two** windows — the app,
-and the Playwright browser holding the Copilot session. That is inherent to the
-design; the second one is where the work happens.
-
-Or start the server by hand:
-
-```powershell
-.\.venv\Scripts\python.exe serve.py --port 8790
-```
-
-**3. Use it.** Chat UI at <http://127.0.0.1:8790/>, or talk OpenAI to it:
 
 ```bash
-curl http://127.0.0.1:8790/v1/chat/completions \
+curl http://127.0.0.1:8791/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"Gpt_5_6_Reasoning","stream":true,
        "messages":[{"role":"user","content":"hi"}]}'
 ```
 
-`GET /v1/models` lists the five valid values. Images work via the standard
-`image_url` part with a base64 `data:` URI. Progress messages come back as
-`reasoning_content`, so a client can fold "Getting things ready…" into a thinking
-block instead of showing it as the answer.
+Leave out `model` and you get the newest GPT reasoning tone. `GET /v1/models` lists the known values. Images work via the standard `image_url` part with a base64 `data:` URI. Progress messages come back as `reasoning_content`, so a client can fold "Getting things ready…" into a thinking block.
 
-A browser window stays visible while this runs. That is deliberate: it is the
-thing holding your session, and `--headless` only works once the profile has one.
+There is a minimal chat UI at `/` for poking at it. The rest, including `COPILOT_PROFILE` for keeping work and personal accounts apart, is in [`api/README.md`](api/README.md).
+
+There used to be a Windows installer and a Python version. Both clicked Microsoft's menu, and the "Sol" rename in November 2026 broke them. The installer is gone; the Python API is in [`archive/python-api`](archive/python-api).
 
 ### Reproducing the finding
 
-Two runs differing only in the picker, then diff them:
+The research tools are Python and still work. Two runs differing only in the picker, then diff them:
 
 ```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install playwright
+.\.venv\Scripts\python.exe capture.py --label signin --seconds 300
 .\.venv\Scripts\python.exe run_probe.py --label send-auto  --tone "Auto" --prompt "Reply with exactly the word OK and nothing else."
-.\.venv\Scripts\python.exe run_probe.py --label send-think --tone "GPT 5.6 Think deeper" --prompt "Reply with exactly the word OK and nothing else."
+.\.venv\Scripts\python.exe run_probe.py --label send-think --tone "GPT-5.6 Sol Think deeper" --prompt "Reply with exactly the word OK and nothing else."
 .\.venv\Scripts\python.exe diff_frames.py captures\send-auto.jsonl captures\send-think.jsonl
 ```
 
----
+`run_probe.py` selects by menu label, so it needs the label Microsoft shows today. I have not rerun it since the Sol rename.
 
 ## Architecture
 
-Playwright owns the browser but not the conversation. We type into the real
-composer, then read the reply off the WebSocket frames the page already receives
-rather than scraping rendered HTML. The DOM can tell you text stopped growing; the
-wire tells you the turn is *finished*, which is a different and much more useful
-fact.
+Playwright owns the browser but not the conversation. The driver types into the real composer, then reads the reply off the WebSocket frames the page already receives. It does not scrape rendered HTML. The DOM can tell you text stopped growing; the wire tells you the turn is finished, which is more useful.
 
 ```mermaid
 flowchart TB
     subgraph local["your machine"]
         client["OpenAI client<br/>curl, SDK, or the chat UI at /"]
-        flask["serve.py — Flask<br/>maps model to tone"]
-        driver["driver.py — one worker thread<br/>owns all Playwright calls"]
-        chromium["Chromium<br/>persistent profile, real SSO session"]
+        server["api/src/server.js<br/>maps model to tone"]
+        driver["api/src/driver.js<br/>owns all Playwright calls"]
+        chromium["Chrome or Edge<br/>persistent profile, real SSO session"]
+        us["userscript, injected<br/>rewrites tone in the frame"]
     end
     subgraph microsoft["Microsoft"]
         page["m365.cloud.microsoft/chat"]
@@ -122,50 +91,46 @@ flowchart TB
         hub["wss substrate.office.com<br/>/m365Copilot/Chathub"]
     end
 
-    client -->|"model = a tone value"| flask
-    flask -->|"prompt, tone, images"| driver
-    driver -->|"picker clicks, typing, set_input_files"| chromium
+    client -->|"model = a tone value"| server
+    server -->|"prompt, tone, images"| driver
+    driver -->|"__mpo.setTone, typing, setInputFiles"| chromium
+    chromium --- us
     chromium --- page
     page -->|"multipart, FileBase64"| upload
-    page -->|"type 4 invocation carrying tone"| hub
+    us -->|"type 4 invocation carrying our tone"| hub
     hub -->|"type 1 deltas, type 2 final, type 3 close"| chromium
     chromium -->|"framereceived events"| driver
-    driver -->|"text and reasoning deltas"| flask
-    flask -->|"data: chat.completion.chunk"| client
+    driver -->|"text and reasoning deltas"| server
+    server -->|"data: chat.completion.chunk"| client
 ```
 
-One browser means one conversation at a time; turns serialise behind a lock.
-Because `tone` is per-conversation, changing `model` between requests starts a new
-Copilot conversation and the previous context is gone.
+One browser means one conversation at a time; turns serialise behind a lock. Changing `model` between requests keeps the conversation, because the server stores the latest tone per message.
 
 ### A single turn
 
 ```mermaid
 sequenceDiagram
     participant C as client
-    participant S as serve.py
-    participant D as driver thread
-    participant B as Chromium
+    participant S as server.js
+    participant D as driver.js
+    participant B as browser + userscript
     participant M as Copilot backend
 
     C->>S: POST /v1/chat/completions
     S->>S: resolve model to tone, pull out data URIs
     S->>D: prompt(text, tone, images)
-
-    alt requested tone differs from this conversation
-        D->>B: reload page, which starts a new conversation
-        D->>B: open picker, hover provider, click the model
-    end
+    D->>B: __mpo.setTone(tone)
 
     opt images attached
-        D->>B: set_input_files with decoded temp files
+        D->>B: setInputFiles with decoded temp files
         B->>M: POST UploadFile, multipart FileBase64
         M-->>B: result Success, docId, conversationId
         B-->>D: response listener settles the wait
     end
 
     D->>B: type the prompt, press Enter
-    B->>M: type 4 invocation, tone included
+    B->>M: type 4 invocation, tone rewritten
+    D->>B: poll __mpo.lastSend, fail if no frame or wrong tone
     M-->>B: type 1 frames, cumulative text
     B-->>D: framereceived
     D-->>S: text and reasoning deltas
@@ -209,13 +174,26 @@ value the app ships rather than only those seen in traffic:
 | `Gpt_5_6_Reasoning` | GPT 5.6 Think deeper (short: "GPT 5.6 Think") | 2 |
 | `Gpt_5_5_Chat` | GPT 5.5 Quick response | 2 |
 
+That was August 2026. On 4 November 2026 the menu read differently, and I took the
+values off the wire with the userscript set to Off:
+
+| `tone` value | Menu label, November 2026 |
+|---|---|
+| `Gpt_5_6_Reasoning` | GPT-5.6 Sol Think deeper (short: "GPT 5.6 Sol Think") |
+| `Gpt_5_6_Chat` | GPT-5.6 Sol Quick response |
+| `Gpt_5_5_Chat` | gone from the menu, not tested since |
+
+So "Sol" is a new label on an old value, and `Gpt_5_6_Chat` is new.
+
 Section 1 holds the generic modes that survived the 7 July 2026 change; section 2
 holds the residual named models. Chat history on this tenant still contains
 `Gpt_5_4_Reasoning` threads even though 5.4 is no longer offered in the menu — the
 values outlive the buttons.
 
 `tone` is **per conversation**, not per profile. A new chat resets to `Magic`
-regardless of what was selected elsewhere.
+regardless of what was selected elsewhere. It is sent with every message, though,
+and the server stores the latest one: a thread that started as `Magic` and got one
+message as `Gpt_5_6_Reasoning` reopens as GPT 5.6 Sol Think.
 
 ---
 
@@ -395,7 +373,7 @@ no attachment array, an empty `message.adaptiveCards`. The upload carries
 `conversationId`, so the image is bound to the **conversation server-side** and
 the prompt stays an ordinary prompt.
 
-`driver.py` does not hand-roll that POST. It writes decoded bytes to a temp file
+`api/src/driver.js` does not hand-roll that POST. It writes decoded bytes to a temp file
 and hands them to Copilot's own `input[type=file]`, so the app builds the
 multipart body, supplies the `conversationId` and the gptv `optionsSets`, and
 carries its own auth — much less to keep in step when Microsoft changes things.
@@ -412,8 +390,10 @@ caller's behalf; and anything under 1 KB is skipped locally, because a 77-byte
 
 | Script | Job |
 |---|---|
-| `serve.py` | Flask: chat UI at `/`, plus `/health`, `/v1/models`, `/v1/cancel`, `/v1/chat/completions`. |
-| `driver.py` | Resident browser on one thread; picker, typing, uploads, frame reading. |
+| `userscript/model-picker.user.js` | Rewrites `tone` on the outgoing chat frame. Tampermonkey, and injected by the API. |
+| `api/src/server.js` | Node `http`: test UI at `/`, plus `/health`, `/v1/models`, `/v1/cancel`, `/v1/chat/completions`. |
+| `api/src/driver.js` | Resident browser; injects the userscript, types, uploads, reads frames. |
+| `archive/python-api/` | The old Python API and launcher. Broken since the Sol rename. |
 | `capture.py` | Passive recorder. You drive; it records frames, POST bodies and streams. |
 | `tap.js` | Injected before page scripts; wraps `fetch`, `EventSource`, `XMLHttpRequest`. |
 | `run_probe.py` | Automated: select a model, send a prompt, capture the turn. |
@@ -472,8 +452,8 @@ these findings have been tested against it.
 
 ## Credit
 
-The SSE chunk encoder in `serve.py`, the confine-Playwright-to-one-thread pattern
-in `driver.py`, and the entire web UI come from
+The SSE chunk encoder, the confine-Playwright-to-one-thread pattern in the
+archived Python driver, and the entire web UI come from
 **[agentry](https://github.com/aweussom/agentry)** — a local proxy that points
 your OpenAI SDK at the coding-agent subscription you already pay for. It wraps a
 CLI (GitHub Copilot, OpenAI Codex, or Claude Code), strips its tool surface, and

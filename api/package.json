@@ -1,0 +1,16 @@
+{
+  "name": "i-want-my-model-picker-back",
+  "version": "0.2.0",
+  "description": "OpenAI-compatible endpoint for M365 Copilot, with a working model parameter",
+  "license": "MIT",
+  "author": "Tommy Leonhardsen",
+  "private": true,
+  "scripts": {
+    "serve": "node src/server.js",
+    "signin": "node src/signin.js",
+    "test": "node src/driver.spec.js && node src/server.spec.js"
+  },
+  "dependencies": {
+    "playwright": "^1.62.1"
+  }
+}

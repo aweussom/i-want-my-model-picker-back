@@ -4,10 +4,9 @@
  *
  * No Express: three routes and a static directory do not justify a dependency.
  *
- * The UI is served unchanged from the Python version's static/ and templates/,
- * so it keeps talking fetch + SSE to /v1/chat/completions and needs no rewrite
- * for Electron. The renderer could use IPC instead, but then the OpenAI surface
- * would have to exist twice, and that surface is the entire point of the project.
+ * The test UI at / is the repo root's static/ and templates/, inherited from
+ * the archived Python version. It talks fetch + SSE to /v1/chat/completions
+ * like any other client.
  *
  * The `model` parameter maps onto `tone`. Microsoft's official Copilot Chat API
  * has no model parameter at all.
@@ -25,17 +24,8 @@ const VERSION = (() => {
   try { return require('../package.json').version; } catch { return 'unknown'; }
 })();
 
-// The Python project's UI, reused verbatim rather than forked again. In a dev
-// checkout it lives two directories up; in a packaged build electron-builder
-// copies it into resources/. Probe rather than branch on app.isPackaged, so this
-// module stays runnable outside Electron (npm run serve) and has no electron
-// import at all.
-const WEB_ROOT = [
-  path.join(__dirname, '..', '..'),                    // dev checkout
-  process.resourcesPath ? path.join(process.resourcesPath, 'web') : null,
-  path.join(__dirname, '..', 'web'),                   // copied next to the app
-].filter(Boolean).find((root) => fs.existsSync(path.join(root, 'templates', 'index.html')))
-  || path.join(__dirname, '..', '..');
+// The repo root, two levels up from api/src.
+const WEB_ROOT = path.join(__dirname, '..', '..');
 
 const INDEX_HTML = path.join(WEB_ROOT, 'templates', 'index.html');
 const STATIC_DIR = path.join(WEB_ROOT, 'static');
@@ -52,11 +42,9 @@ const MIME = {
 /**
  * Map an OpenAI `model` value onto a tone.
  *
- * `fallback` is the driver's per-account default, not a module constant: which
- * tones exist depends on the account. A work tenant offers named GPT models; a
- * personal Microsoft account offers only Auto / Quick response / Think deeper.
- * Falling back to a hardcoded GPT on an account that has never had one meant
- * asking for a menu entry that is not there and quietly answering as Auto.
+ * `fallback` is the driver's default (newest GPT in TONES). An unknown model
+ * name falls back to it rather than failing; the tone that actually went out
+ * is logged by the driver and reported as `tone` by /health.
  */
 function resolveTone(requested, fallback = DEFAULT_TONE) {
   if (!requested) return fallback;
@@ -186,8 +174,8 @@ function createServer(driver) {
     if (route === '/v1/models') {
       // Default first: the UI populates its dropdown in this order and the
       // browser selects option zero, so ordering *is* the default selection.
-      // Only what this account actually offers, discovered from the real picker
-      // at startup, with the account's own default first.
+      // availableTones is always null since the picker is no longer clicked, so
+      // this lists every known tone, default first.
       const preferred = (driver && driver.defaultTone) || DEFAULT_TONE;
       const offered = (driver && driver.availableTones) || Object.keys(TONES);
       const ids = offered

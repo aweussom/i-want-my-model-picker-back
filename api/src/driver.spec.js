@@ -58,13 +58,17 @@ check('upload recognised', () =>
   assert.ok(isUpload('https://substrate.office.com/m365Copilot/UploadFile')));
 
 console.log('tones');
-check('five tones, and the newest GPT is what we request by default', () => {
-  assert.equal(Object.keys(TONES).length, 5);
+check('six tones, and the newest GPT is what we request by default', () => {
+  assert.equal(Object.keys(TONES).length, 6);
   assert.equal(DEFAULT_TONE, 'Gpt_5_6_Reasoning');
-  // The menu entry and the selected-state button use different names, so both
-  // the long form and the shortTitle have to be present.
+  // Labels are aliases for resolveTone() now. Both the Sol menu text of Nov
+  // 2026 and the older names must resolve.
+  assert.ok(TONES.Gpt_5_6_Reasoning.labels.includes('GPT-5.6 Sol Think deeper'));
   assert.ok(TONES.Gpt_5_6_Reasoning.labels.includes('GPT 5.6 Think deeper'));
-  assert.ok(TONES.Gpt_5_6_Reasoning.labels.includes('GPT 5.6 Think'));
+  assert.ok(TONES.Gpt_5_6_Chat.labels.includes('GPT-5.6 Sol Quick response'));
+});
+check('every tone value is something the userscript hook accepts', () => {
+  for (const id of Object.keys(TONES)) assert.match(id, /^[A-Za-z0-9_]+$/);
 });
 
 console.log('short titles');
