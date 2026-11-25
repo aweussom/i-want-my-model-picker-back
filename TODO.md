@@ -82,3 +82,14 @@ read that before proposing anything structural.
 
 - `run_probe.py` selects by menu label and has not been rerun since the
   "GPT-5.6 Sol" rename of 2026-11-04.
+
+- Aider leaves one Copilot chat per request (RUNBOOK.md). `cleanup-tests.js`
+  does not match them; their titles come from the API preamble ("You are serving
+  as the model behind an API..."). Add that pattern, dry-run first.
+
+- `aider-full-history` is not merged to main. Use it on real work for a while
+  first, then merge, and point api/README.md at RUNBOOK.md.
+
+- The default is the bottom entry of the GPT submenu. If Microsoft adds a cheaper
+  model last, it becomes the default without an error. A log line when the
+  default is not in TONES would at least show it.
