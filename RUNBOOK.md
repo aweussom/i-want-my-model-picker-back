@@ -57,7 +57,7 @@ When the menu changes, use the new name from `/v1/models` in `--model` and add a
 
 - The composer takes at most 128,000 characters. Larger prompts get a 400 `context_length_exceeded`. Drop files from the aider chat.
 - Copilot HTML-escapes tag-like text on the way in (`<b>` arrives as `&lt;b&gt;`). The API's preamble tells the model to write real brackets. That fixed it in four of four quote checks, a small sample.
-- Every request leaves a chat in the account's Copilot history. `src/cleanup-tests.js` does not match them.
+- Every request leaves a chat in the account's Copilot history. The server logs each one's id to `api/.api-chats.jsonl`. To delete them, stop the server and run `node src/cleanup-tests.js --api-chats --dry-run` from `api/`, then again without `--dry-run`. Copilot titles these chats itself, so the tool goes by id, not title.
 - Aider shows 0 tokens sent and received. The API reports no usage.
 - After a crash or `taskkill /T`, a headless Chrome can keep holding the profile and the next start fails with "No usable browser". Find it and stop it:
 

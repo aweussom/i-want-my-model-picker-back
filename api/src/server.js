@@ -27,6 +27,27 @@ const VERSION = (() => {
 // The repo root, two levels up from api/src.
 const WEB_ROOT = path.join(__dirname, '..', '..');
 
+// Every chat a full-history request creates, one JSON line each, so
+// `node src/cleanup-tests.js --api-chats` can delete them by id. Titles cannot be
+// matched: Copilot writes its own ("Implement Duration String Parsing"), and they
+// sit between the account owner's real chats [OBSERVED 2026-11-25].
+const API_CHATS_LEDGER = path.join(__dirname, '..', '.api-chats.jsonl');
+
+function recordApiChat(driver, tone) {
+  const id = driver.currentConversationId();
+  if (!id) {
+    console.log('[server] WARNING: no conversation id after the answer; this chat is not in the ledger and cleanup will miss it');
+    return;
+  }
+  const line = JSON.stringify({ id, tone, at: new Date().toISOString() });
+  try {
+    fs.appendFileSync(API_CHATS_LEDGER, line + '\n');
+    console.log(`[server] recorded chat ${id} in ${path.basename(API_CHATS_LEDGER)} for cleanup`);
+  } catch (e) {
+    console.log(`[server] ERROR: could not record chat ${id} in ${API_CHATS_LEDGER}: ${e.message}`);
+  }
+}
+
 const INDEX_HTML = path.join(WEB_ROOT, 'templates', 'index.html');
 const STATIC_DIR = path.join(WEB_ROOT, 'static');
 
@@ -377,8 +398,10 @@ function createServer(driver) {
           for await (const ev of driver.prompt(prompt, { tone, images: uris, ...promptOptions })) {
             res.write(sseChunk(ev.value, tone, { reasoning: ev.kind === 'reasoning' }));
           }
+          if (promptOptions.fresh) recordApiChat(driver, tone);
         } catch (e) {
           res.write(sseChunk(`\n[error: ${e.message}]`, tone));
+          if (promptOptions.fresh) recordApiChat(driver, tone);
         }
         res.write(sseChunk('', tone, { done: true }));
         return void res.end();
@@ -389,6 +412,7 @@ function createServer(driver) {
         for await (const ev of driver.prompt(prompt, { tone, images: uris, ...promptOptions })) {
           if (ev.kind === 'text') text += ev.value;
         }
+        if (promptOptions.fresh) recordApiChat(driver, tone);
         return json(res, 200, {
           id: `chatcmpl-${crypto.randomBytes(6).toString('hex')}`,
           object: 'chat.completion',
@@ -397,6 +421,7 @@ function createServer(driver) {
           choices: [{ index: 0, message: { role: 'assistant', content: text }, finish_reason: 'stop' }],
         });
       } catch (e) {
+        if (promptOptions.fresh) recordApiChat(driver, tone);
         return json(res, 502, { error: { message: e.message } });
       }
     }

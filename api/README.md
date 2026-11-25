@@ -15,6 +15,10 @@ python smoke_test.py                # against the running API: 2 real prompts, c
 ```
 
 `COPILOT_PROFILE` picks the profile directory, so keep work and personal apart.
+`COPILOT_HISTORY=full` sends the whole conversation as one prompt in a new chat per
+request. Aider needs it; [RUNBOOK.md](../RUNBOOK.md) has the rest. Those chats are
+logged to `.api-chats.jsonl`, and `node src/cleanup-tests.js --api-chats` deletes
+them. Stop the server first, both use the profile.
 `COPILOT_CHANNEL=chrome|msedge` pins the browser.
 
 ## Layout

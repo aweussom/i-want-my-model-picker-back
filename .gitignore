@@ -24,3 +24,7 @@ logs/
 node_modules/
 api/dist/
 package-lock.json
+
+# IDs of the chats the API created, for cleanup-tests.js --api-chats. They
+# point into a real account history; keep them local.
+.api-chats.jsonl
