@@ -57,7 +57,11 @@ const COMPOSER_SELECTORS = [
 // the userscript set to Off. Gpt_5_5_Chat had left the menu by then and is
 // untested since; kept because values have outlived their buttons before.
 // Gpt_62_Sol_Reasoning was read off the wire on 2026-11-25, menu label
-// "GPT-6.2 Sol". No Chat counterpart seen yet.
+// "GPT-6.2 Sol". Gpt_6_Sol_Chat ("GPT-6") was read from the menu metadata the
+// same day.
+//
+// Since 2026-11-25 this list is the fallback and the label alias table. The
+// live menu comes from the userscript (window.__mpo.menu), read at start().
 const TONES = {
   Magic: {
     labels: ['Auto', 'Automatisk'],
@@ -74,6 +78,10 @@ const TONES = {
   Gpt_62_Sol_Reasoning: {
     labels: ['GPT-6.2 Sol', 'GPT 6.2 Sol', 'GPT 6.2'],
     title: 'GPT-6.2 Sol', ownedBy: 'openai',
+  },
+  Gpt_6_Sol_Chat: {
+    labels: ['GPT-6', 'GPT 6'],
+    title: 'GPT-6', ownedBy: 'openai',
   },
   Gpt_5_6_Reasoning: {
     labels: ['GPT-5.6 Sol Think deeper', 'GPT 5.6 Sol Think', 'GPT 5.6 Think deeper',
@@ -225,10 +233,13 @@ class CopilotDriver {
     this.usingChannel = null;
     this.sandboxEnabled = null;
     // Always null now. It used to be filled by clicking through the menu; the
-    // menu is no longer touched, and the model list is not in the page's
-    // hydration data [OBSERVED 2026-11-04]. null means "not discovered", and
-    // server.js then offers every entry in TONES.
+    // menu is no longer touched. Since 2026-11-25 the userscript reads the
+    // menu out of the page's server-rendered HTML (it is not in the live DOM;
+    // the hydration scripts delete themselves), and start() copies it here.
+    // null means "not read", and server.js then offers every entry in TONES.
     this.availableTones = null;
+    // Bottom of the menu's OpenAI group, from the userscript; null if not read.
+    this.menuDefault = null;
     this._conversationPinned = false;   // true while continuing a reopened thread
     // The tone of the last chat frame that went out, as reported by the
     // userscript. Before any send it is what a fresh conversation is on; after
@@ -560,6 +571,28 @@ class CopilotDriver {
     }
     console.log(`[driver] userscript hook present, v${hookVersion}`);
 
+    // The userscript fetches the page once and reads the model menu from it.
+    // Wait for that, so the default tone and /v1/models show what this account
+    // offers. A cached menu (from an earlier run in this profile) counts only
+    // after the wait; without any, the API runs on the static TONES list.
+    console.log('[driver] waiting up to 20s for the userscript to read the model menu');
+    let menuState = null;
+    for (let i = 0; i < 40; i++) {
+      menuState = await this.page.evaluate(() => ({
+        menu: window.__mpo.menu, best: window.__mpo.bestTone, from: window.__mpo.menuFrom,
+      }));
+      if (menuState.menu && menuState.from.startsWith('page')) break;
+      await this.page.waitForTimeout(500);
+    }
+    if (menuState.menu) {
+      this.availableTones = menuState.menu.map((item) => item.id);
+      this.menuDefault = menuState.best;
+      const listed = menuState.menu.map((item) => item.id + (item.gated ? '[gated]' : '')).join(', ');
+      console.log(`[driver] model menu (${menuState.from}): ${listed}; default = ${menuState.best || 'NONE'}`);
+    } else {
+      console.warn(`[driver] the userscript read no model menu; default falls back to the static TONES list: ${highestGptTone(TONES)}`);
+    }
+
     this._tmpdir = this._tmpdir || await fs.mkdtemp(path.join(os.tmpdir(), 'copilot-wire-'));
     this.ready = true;
     return this;
@@ -700,14 +733,13 @@ class CopilotDriver {
   }
 
   /**
-   * Newest GPT in TONES. No longer per-account: nothing discovers what an
-   * account offers now, so a personal account (which showed only the three
-   * generic modes) will be asked for a GPT tone too. What the server does with
-   * a tone the account does not have is untested; a rejection surfaces as a
-   * driver error, a silent downgrade would not be visible.
+   * The bottom entry of the account's own OpenAI menu group, as read by the
+   * userscript at start(). Falls back to the newest GPT in TONES when no menu
+   * was read, which start() logs as a warning. A personal account has no
+   * OpenAI group at all (2026-09-15), so it lands on the fallback too.
    */
   get defaultTone() {
-    return highestGptTone(TONES);
+    return this.menuDefault || highestGptTone(TONES);
   }
 
   /**

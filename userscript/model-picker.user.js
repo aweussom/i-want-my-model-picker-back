@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         i want my model picker back (overlay)
 // @namespace    https://github.com/aweussom/i-want-my-model-picker-back
-// @version      20261125-153828
+// @version      20261125-225004
 // @description  Forces the best GPT reasoning model on every M365 Copilot chat message, whatever Microsoft's picker says. No interaction needed.
 // @match        https://m365.cloud.microsoft/*
 // @match        https://copilot.cloud.microsoft/*
@@ -21,10 +21,9 @@
 // script wraps WebSocket.prototype.send, finds that record, swaps tone, and lets
 // everything else through byte-for-byte.
 //
-// Default mode is "best": the highest Gpt_<major>_<minor>_Reasoning, or the
-// glued Gpt_<major><minor>_<Name>_Reasoning, known. No dropdown; a small badge shows what is being forced. If Microsoft's own picker
-// ever sends a higher Gpt_*_Reasoning (you picked a new model in their menu),
-// that value is adopted as the new best and remembered.
+// Default mode is "best": the bottom entry of the OpenAI group in Copilot's
+// own model menu, read from the page. No dropdown; a small badge shows what is
+// being forced, and turns red when the menu could not be read.
 //
 // Patching the prototype rather than the constructor is deliberate: it catches
 // sockets created by code that grabbed a reference to WebSocket before we ran.
@@ -40,68 +39,143 @@
   "use strict";
 
   // Keep in step with @version above; both are stamped by the same edit.
-  const VERSION = "20261125-153828";
+  const VERSION = "20261125-225004";
   const TAG = "[model-picker-overlay]";
   // New key on purpose: the earlier dropdown version stored explicit picks
   // under "mpo.tone", and an old pick must not pin a browser below "best".
   const MODE_KEY = "mpo.mode";
-  const LEARNED_KEY = "mpo.learnedBest";
+  // Last menu read from the page, so the first send after a reload does not
+  // depend on the fetch having finished.
+  const MENU_KEY = "mpo.menu";
+  // Versions before the menu read learned a "best" from tone names. Removed on
+  // load so a stale value cannot look like it still matters.
+  const OLD_LEARNED_KEY = "mpo.learnedBest";
   const RECORD_SEPARATOR = "\x1e"; // SignalR JSON protocol record terminator
   const OFF = ""; // do not touch the frame, Microsoft's picker decides
   const BEST = "best"; // resolve to bestTone() at send time
 
-  // Reasoning tones seen on the wire. Gpt_5_6_Reasoning is shown as
-  // "GPT-5.6 Sol Think deeper" [OBSERVED 2026-11-04]. Gpt_62_Sol_Reasoning is
-  // shown as "GPT-6.2 Sol" [OBSERVED 2026-11-25].
-  const KNOWN_REASONING_TONES = ["Gpt_5_6_Reasoning", "Gpt_62_Sol_Reasoning"];
-  // Used only if no Gpt_*_Reasoning is known at all.
-  const FALLBACK_TONE = "Reasoning";
-
   // --- best-tone logic -------------------------------------------------------
-
-  // "Gpt_5_6_Reasoning" -> 5006, "Gpt_62_Sol_Reasoning" -> 6002; anything
-  // else -> null. Major dominates minor.
   //
-  // Two shapes are on the wire. 5.6 has an underscore between major and minor.
-  // 6.2 came glued ("62") with a name word ("Sol") before "_Reasoning". Reading
-  // "62" as 6.2 is inferred from the menu label "GPT-6.2 Sol"; read as 62 it
-  // would outrank any real 7.x forever.
-  function reasoningRank(tone) {
-    const m = /^Gpt_(\d+)(?:_(\d+))?(?:_[A-Za-z]+)?_Reasoning$/.exec(String(tone));
-    if (!m) {
-      return null;
-    }
-    if (m[2] !== undefined) {
-      return Number(m[1]) * 1000 + Number(m[2]);
-    }
-    const digits = m[1];
-    const major = Number(digits.slice(0, 1));
-    const minor = digits.length > 1 ? Number(digits.slice(1)) : 0;
-    return major * 1000 + minor;
-  }
+  // "best" is the bottom entry of the OpenAI group in Copilot's own model menu.
+  // Microsoft has kept the most expensive model last through GPT-5.6, 6, 6.1
+  // and 6.2 [OBSERVED up to 2026-11-25], while the value naming changed shape
+  // three times: Gpt_5_6_Reasoning, Gpt_6_Sol_Chat, Gpt_62_Sol_Reasoning. So
+  // position is trusted and names are not parsed at all.
+  //
+  // The menu is clientPreferences.modelSelectorMetadata, rendered by the server
+  // into the HTML. The hydration scripts that carry it delete themselves after
+  // running, so it is not in the live DOM; the script fetches its own page once
+  // and reads it from the raw HTML. That HTML holds one copy per agent (Cowork,
+  // Researcher, Planner, ...), with different entries; the chat's own copy is
+  // the first one after "bizchat-as-gpt-scenario" [OBSERVED 2026-11-25].
 
-  let learnedBest = null;
-  try {
-    learnedBest = localStorage.getItem(LEARNED_KEY);
-  } catch (err) {
-    console.warn(TAG, "localStorage unreadable, no learned best tone:", err);
-  }
+  const CHAT_AGENT_MARKER = "bizchat-as-gpt-scenario";
+  const METADATA_KEY = "modelSelectorMetadata";
+  const MENU_GROUP = "OpenAI";
 
-  function bestTone() {
-    const candidates = KNOWN_REASONING_TONES.slice();
-    if (learnedBest && reasoningRank(learnedBest) !== null) {
-      candidates.push(learnedBest);
+  // The JSON object after METADATA_KEY sits inside a JS string inside a
+  // script, so it arrives escaped one or more levels. Unescape until it parses.
+  function parseMetadataAt(html, keyAt) {
+    const open = html.indexOf("{", keyAt);
+    if (open < 0) {
+      throw new Error(`no "{" after ${METADATA_KEY}`);
     }
-    let best = null;
-    let bestRank = -1;
-    for (const tone of candidates) {
-      const rank = reasoningRank(tone);
-      if (rank !== null && rank > bestRank) {
-        best = tone;
-        bestRank = rank;
+    let depth = 0;
+    let close = -1;
+    for (let k = open; k < html.length; k++) {
+      const c = html[k];
+      if (c === "{") {
+        depth += 1;
+      }
+      if (c === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          close = k;
+          break;
+        }
       }
     }
-    return best || FALLBACK_TONE;
+    if (close < 0) {
+      throw new Error(`unbalanced braces after ${METADATA_KEY}`);
+    }
+    let candidate = html.slice(open, close + 1);
+    for (let level = 0; level < 4; level++) {
+      try {
+        return JSON.parse(candidate);
+      } catch (_) {
+        // Not JSON at this escaping level. Unescape one level and retry; that
+        // JSON.parse throws, loud, if it is not an escaped string either.
+      }
+      candidate = JSON.parse(`"${candidate}"`);
+    }
+    throw new Error(`${METADATA_KEY} still not JSON after 4 unescapes`);
+  }
+
+  // Flat list of menu entries: {id, title, group, section, gated}. id is the
+  // wire tone value. gated means the entry carries a tenant policy check, which
+  // this script cannot evaluate (both Claude entries were gated, and disabled,
+  // on the work tenant on 2026-11-25).
+  function flattenMenu(meta) {
+    const options = meta.availableModelSelectionOptions;
+    if (!Array.isArray(options)) {
+      throw new Error("availableModelSelectionOptions missing or not a list");
+    }
+    const items = [];
+    for (const opt of options) {
+      if (Array.isArray(opt.itemGroup)) {
+        for (const child of opt.itemGroup) {
+          items.push({
+            id: child.id, title: child.menuItemTitle, group: opt.id,
+            section: child.sectionNumber, gated: Boolean(child.policyExpression),
+          });
+        }
+        continue;
+      }
+      items.push({
+        id: opt.id, title: opt.menuItemTitle, group: null,
+        section: opt.sectionNumber, gated: Boolean(opt.policyExpression),
+      });
+    }
+    return items;
+  }
+
+  function menuFromHtml(html) {
+    const agentAt = html.indexOf(CHAT_AGENT_MARKER);
+    if (agentAt < 0) {
+      throw new Error(`"${CHAT_AGENT_MARKER}" not in the page; Copilot renamed its chat agent?`);
+    }
+    const keyAt = html.indexOf(METADATA_KEY, agentAt);
+    if (keyAt < 0) {
+      throw new Error(`no ${METADATA_KEY} after "${CHAT_AGENT_MARKER}"`);
+    }
+    return flattenMenu(parseMetadataAt(html, keyAt));
+  }
+
+  let menu = null; // flat menu items, or null until read
+  let menuFrom = "nowhere"; // "cache <iso>" or "page <iso>", for logs and __mpo
+  try {
+    const cached = JSON.parse(localStorage.getItem(MENU_KEY) || "null");
+    if (cached && Array.isArray(cached.items)) {
+      menu = cached.items;
+      menuFrom = `cache ${cached.at}`;
+    }
+    localStorage.removeItem(OLD_LEARNED_KEY);
+  } catch (err) {
+    console.warn(TAG, "localStorage unreadable or cached menu corrupt; no cached menu:", err);
+  }
+
+  // Bottom entry of the OpenAI group, or null when there is no menu or no group.
+  function bestTone() {
+    if (!menu) {
+      return null;
+    }
+    let bottom = null;
+    for (const item of menu) {
+      if (item.group === MENU_GROUP) {
+        bottom = item;
+      }
+    }
+    return bottom ? bottom.id : null;
   }
 
   // --- state ---------------------------------------------------------------
@@ -115,16 +189,18 @@
   } catch (err) {
     console.warn(TAG, "localStorage unreadable, starting in best mode:", err);
   }
-  console.info(TAG, `loaded v${VERSION}; mode = ${mode || "(off)"}; best = ${bestTone()}`);
+  console.info(TAG, `loaded v${VERSION}; mode = ${mode || "(off)"}; best = ${bestTone() || "UNKNOWN"} (menu from ${menuFrom})`);
 
   let badge = null; // DOM node, set once mounted
   let sendCount = 0; // chat invocations seen on the wire, rewritten or not
   let lastSend = null; // {before, sent, at} for the most recent one
 
   // What tone the next frame will carry, or "" for leave it alone.
+  // In best mode without a menu this is OFF: forcing a guessed tone is worse
+  // than forcing nothing. The send path and the red badge say so.
   function effectiveTone() {
     if (mode === BEST) {
-      return bestTone();
+      return bestTone() || OFF;
     }
     return mode;
   }
@@ -132,6 +208,9 @@
   function describeMode() {
     if (mode === OFF) {
       return "off: Microsoft's picker decides";
+    }
+    if (mode === BEST && !bestTone()) {
+      return "best: NO MENU DATA, not rewriting";
     }
     if (mode === BEST) {
       return `forcing ${bestTone()} (best)`;
@@ -147,9 +226,58 @@
       console.warn(TAG, "could not persist mode; applies to this tab only:", err);
     }
     console.info(TAG, `mode set to ${value || "(off)"}; ${describeMode()}`);
-    if (badge) {
-      badge.textContent = describeMode();
+    renderBadge();
+  }
+
+  // Badge text is describeMode() plus an optional note; red while best mode has
+  // no menu, because then nothing is being forced.
+  function renderBadge(note) {
+    if (!badge) {
+      return;
     }
+    badge.textContent = note ? `${describeMode()}; ${note}` : describeMode();
+    const alarm = mode === BEST && !bestTone();
+    badge.style.background = alarm ? "rgba(170,20,20,0.92)" : "rgba(20,20,24,0.75)";
+  }
+
+  // Fetch our own page and read the menu out of the raw HTML. Runs once per page
+  // load. On failure the previous menu (cached or none) stays, and it says so.
+  async function loadMenu() {
+    const where = location.pathname;
+    console.info(TAG, `reading the model menu: fetching ${where} for its server-rendered ${METADATA_KEY}, expecting a "${MENU_GROUP}" group`);
+    let html;
+    try {
+      const res = await fetch(where, { credentials: "include" });
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      html = await res.text();
+    } catch (err) {
+      console.error(TAG, `menu fetch failed: ${err.message}; best stays ${bestTone() || "UNKNOWN"} (menu from ${menuFrom})`);
+      renderBadge();
+      return;
+    }
+    let items;
+    try {
+      items = menuFromHtml(html);
+    } catch (err) {
+      console.error(TAG, `menu not readable from ${html.length} chars of HTML: ${err.message}; best stays ${bestTone() || "UNKNOWN"} (menu from ${menuFrom})`);
+      renderBadge();
+      return;
+    }
+    const previous = bestTone();
+    const at = new Date().toISOString();
+    menu = items;
+    menuFrom = `page ${at}`;
+    try {
+      localStorage.setItem(MENU_KEY, JSON.stringify({ at, items }));
+    } catch (err) {
+      console.warn(TAG, "could not cache the menu; the next reload starts without one:", err);
+    }
+    const best = bestTone();
+    const change = previous && previous !== best ? ` (was ${previous})` : "";
+    console.info(TAG, `menu: ${items.map((i) => i.id + (i.gated ? "[gated]" : "")).join(", ")}; best = ${best || `NONE, no "${MENU_GROUP}" group`}${change}`);
+    renderBadge();
   }
 
   // Hook for the API driver and for the console. setTone("best"), setTone("")
@@ -169,6 +297,17 @@
     },
     get bestTone() {
       return bestTone();
+    },
+    // Flat copy of the chat's model menu, or null. The API driver reads this
+    // for its default tone and for /v1/models.
+    get menu() {
+      return menu ? menu.map((item) => ({ ...item })) : null;
+    },
+    get menuFrom() {
+      return menuFrom;
+    },
+    reloadMenu() {
+      return loadMenu();
     },
     get sendCount() {
       return sendCount;
@@ -226,24 +365,16 @@
 
       const before = arg0.tone;
 
-      // Learn: Microsoft's picker offering something newer than our best means
-      // a new model shipped. Adopt it so "best" moves up without an edit.
-      const beforeRank = reasoningRank(before);
-      const bestRank = reasoningRank(bestTone());
-      if (beforeRank !== null && (bestRank === null || beforeRank > bestRank)) {
-        console.info(TAG, `picker sent ${before}, newer than best ${bestTone()}; adopting it`);
-        learnedBest = before;
-        try {
-          localStorage.setItem(LEARNED_KEY, before);
-        } catch (err) {
-          console.warn(TAG, "could not persist learned best; applies to this tab only:", err);
-        }
-      }
 
       const target = effectiveTone();
       sendCount += 1;
       lastSend = { before, sent: target || before, at: Date.now() };
 
+      if (!target && mode === BEST) {
+        console.error(TAG, `best mode but no menu data (menu from ${menuFrom}); frame sent UNMODIFIED with tone = ${before}`);
+        renderBadge(`picker sent ${before}`);
+        continue;
+      }
       if (!target) {
         console.info(TAG, `override off; Microsoft's picker sent tone = ${before}`);
         if (badge) {
@@ -255,9 +386,7 @@
       arg0.tone = target;
       records[i] = JSON.stringify(msg);
       changed = true;
-      if (badge) {
-        badge.textContent = `${describeMode()}; last: ${before} → ${target}`;
-      }
+      renderBadge(`last: ${before} → ${target}`);
     }
 
     if (!changed) {
@@ -291,10 +420,16 @@
       borderRadius: "5px",
       pointerEvents: "none",
     });
-    badge.textContent = describeMode();
     document.body.appendChild(badge);
+    renderBadge();
     console.info(TAG, "badge mounted");
     return true;
+  }
+
+  if (location.pathname.startsWith("/chat")) {
+    loadMenu();
+  } else {
+    console.info(TAG, `not a chat page (${location.pathname}); menu not read`);
   }
 
   // document-start means no body yet. Poll until there is one; the SPA may also

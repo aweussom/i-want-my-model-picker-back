@@ -58,8 +58,8 @@ check('upload recognised', () =>
   assert.ok(isUpload('https://substrate.office.com/m365Copilot/UploadFile')));
 
 console.log('tones');
-check('seven tones, and the newest GPT is what we request by default', () => {
-  assert.equal(Object.keys(TONES).length, 7);
+check('eight tones, and the newest GPT is what we request by default', () => {
+  assert.equal(Object.keys(TONES).length, 8);
   assert.equal(DEFAULT_TONE, 'Gpt_62_Sol_Reasoning');
   // Labels are aliases for resolveTone() now. Both the Sol menu text of Nov
   // 2026 and the older names must resolve.
