@@ -5,8 +5,17 @@ A userscript that makes Microsoft 365 Copilot send every message to the best GPT
 ## Install
 
 1. Install [Tampermonkey](https://www.tampermonkey.net/) or Violentmonkey in Chrome, Edge or Firefox.
-2. Open the script's raw file: <https://raw.githubusercontent.com/aweussom/i-want-my-model-picker-back/main/userscript/model-picker.user.js>. Tampermonkey shows an install page. Click Install.
-3. Reload Copilot (`m365.cloud.microsoft` or `copilot.cloud.microsoft`).
+2. Let it run scripts. Chrome and Edge run no userscript until this switch is on, and Tampermonkey stays quiet about it. Right-click the Tampermonkey icon in the toolbar and pick Manage extension:
+
+   ![Tampermonkey's menu with Manage extension](docs/img/tampermonkey-manage-extension.png)
+
+   On the page that opens, turn on Allow User Scripts:
+
+   ![Allow User Scripts switched on](docs/img/tampermonkey-allow-user-scripts.png)
+
+   The screenshots are Chrome; Edge has the same switch. Firefox probably has something like it too. I have not checked, so if the script does nothing there, look in the extension's permissions.
+3. Open the script's raw file: <https://raw.githubusercontent.com/aweussom/i-want-my-model-picker-back/main/userscript/model-picker.user.js>. Tampermonkey shows an install page. Click Install.
+4. Reload Copilot (`m365.cloud.microsoft` or `copilot.cloud.microsoft`).
 
 That is all. The script carries its own update URL, so Tampermonkey fetches new versions from the same place by itself. When Copilot changes and the script needs a fix, it reaches you without you doing anything.
 
