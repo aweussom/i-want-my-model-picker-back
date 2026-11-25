@@ -101,6 +101,15 @@ function flattenMessages(body) {
     'conversation so far. Follow the SYSTEM instructions exactly and write only the ' +
     'next ASSISTANT message: no preamble, no citations, no web search, no commentary ' +
     'about this format.',
+    // Copilot HTML-escapes tag-like text in the prompt: "(?P<hours>" reached the
+    // model as "(?P&lt;hours&gt;" while its own output kept real brackets
+    // [OBSERVED 2026-11-25, escape probe]. aider's SEARCH blocks then copied the
+    // escaped form and failed to match. The escaping cannot be turned off from
+    // here, so the model is told how to read it.
+    'Transport note: this transcript passed through a filter that HTML-escapes ' +
+    'tag-like text. Wherever you see &lt; or &gt; in the transcript, the original ' +
+    'file has < or >. When you quote or edit existing code, write the real < and > ' +
+    'characters, never &lt; or &gt;.',
   ];
   for (const m of messages) {
     const text = messageText(m);
