@@ -241,9 +241,12 @@ class CopilotDriver {
     // Bottom of the menu's OpenAI group, from the userscript; null if not read.
     this.menuDefault = null;
     // The full menu as the userscript read it: [{id, title, group, section,
-    // gated}], or null. Set together with availableTones and menuDefault, in
-    // one place in start(); all three are null or all three are set.
+    // gated}], or null. Set together with availableTones, menuDefault and
+    // menuFrom, in one place in start(); all are null or all are set.
     this.menu = null;
+    // Where that menu came from, as the userscript reports it: "page <iso>"
+    // (read this run) or "cache <iso>" (an earlier run; the page read failed).
+    this.menuFrom = null;
     this._conversationPinned = false;   // true while continuing a reopened thread
     // The tone of the last chat frame that went out, as reported by the
     // userscript. Before any send it is what a fresh conversation is on; after
@@ -590,6 +593,7 @@ class CopilotDriver {
     }
     if (menuState.menu) {
       this.menu = menuState.menu;
+      this.menuFrom = menuState.from;
       this.availableTones = menuState.menu.map((item) => item.id);
       this.menuDefault = menuState.best;
       const listed = menuState.menu.map((item) => item.id + (item.gated ? '[gated]' : '')).join(', ');
