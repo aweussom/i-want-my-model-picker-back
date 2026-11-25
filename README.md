@@ -10,9 +10,10 @@ dropdown. It is one field. This repo sets it for you, two ways:
 2. An OpenAI-compatible API, for scripts and SDK clients. Same userscript under the hood.
 
 Earlier versions of this file said Microsoft was deleting the picker. On a work
-tenant it is still there: re-checked on 15 September 2026, and again on 4 November,
-when the entries had been renamed "GPT-5.6 Sol". What varies is the account. A free
-consumer account gets the three generic modes and no GPT submenu at all. See
+tenant it is still there: re-checked 15 September 2026, again 4 November (entries
+renamed "GPT-5.6 Sol"), and 25 November ("GPT-6.2 Sol" showed up). What varies is
+the account. A free consumer account gets the three generic modes and no GPT
+submenu at all. See
 [Is it still there?](#is-it-still-there--re-checked-15-september-2026) for how that
 was measured.
 
@@ -24,9 +25,9 @@ was measured.
 
 [`userscript/model-picker.user.js`](userscript/model-picker.user.js). Install with Tampermonkey or Violentmonkey: create a new script, paste the file in, save, reload Copilot. It matches `m365.cloud.microsoft` and `copilot.cloud.microsoft`.
 
-Nothing to set. Every message goes out on the best reasoning model the script knows, today `Gpt_5_6_Reasoning` ("GPT-5.6 Sol Think deeper" in Microsoft's menu). A small badge in the corner says what it is forcing. It is click-through, so it never covers anything.
+Nothing to set. Every message goes out on the best reasoning model the script knows - today `Gpt_62_Sol_Reasoning` ("GPT-6.2 Sol" in Microsoft's menu). A small badge in the corner says what it is forcing. It is click-through, so it never covers anything.
 
-If Microsoft ships something newer and you pick it once in their menu, the script sees a higher `Gpt_<major>_<minor>_Reasoning` go out, adopts it as the new best, and remembers it. No edit needed.
+If Microsoft ships something newer and you pick it once in their menu, the script sees a higher reasoning tone go out, adopts it as the new best, and remembers it. That only works if the new value has a shape the script can rank. 6.2 did not. It came as `Gpt_62_Sol_Reasoning` where I expected `Gpt_6_2_Reasoning`, the old pattern ignored it, and the script needed an edit after all. It now reads both shapes, and takes the glued `62` as 6.2 because that is what the menu says.
 
 How it works: it wraps `WebSocket.prototype.send`, finds the chat invocation on the Chathub socket, and replaces one field, `arguments[0].tone`. Everything else goes out byte for byte. Microsoft's menu keeps showing its own label, because the script never touches it.
 
@@ -38,6 +39,11 @@ What I have checked, on 4 November 2026, on a work tenant:
 - The server keeps it: a chat sent with Microsoft's menu on Auto and the script on `Gpt_5_6_Reasoning` reopens with the menu showing "GPT 5.6 Think". The app can only have got that value from the rewritten frame.
 - It is the same request the client builds: on 15 September a force-injected turn and a picker-selected one diffed identical, and a bogus tone was refused. See [Is it still there?](#is-it-still-there--re-checked-15-september-2026).
 - It also works mid-conversation. A thread whose first message went out as `Magic` got one more message rewritten to `Gpt_5_6_Reasoning`. After switching to another chat and back, the menu showed "GPT 5.6 Sol Think" for it. The menu does not update live; it reads the stored value when the thread loads.
+
+On 25 November 2026, same tenant, script version 20261125-153828:
+
+- With the override off, picking "GPT-6.2 Sol" sends `Gpt_62_Sol_Reasoning`.
+- With it on and the menu on Auto, the console logs `Magic -> Gpt_62_Sol_Reasoning`, and the thread reopens with the menu showing "GPT-6.2 Sol".
 
 The console says what it is doing, prefixed `[model-picker-overlay]`. If there is no `loaded` line, the script was not injected into the page. If it loads but never logs a send, Copilot has changed its transport and the script is doing nothing.
 
@@ -57,7 +63,7 @@ npm run serve       # http://127.0.0.1:8791
 ```bash
 curl http://127.0.0.1:8791/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"Gpt_5_6_Reasoning","stream":true,
+  -d '{"model":"Gpt_62_Sol_Reasoning","stream":true,
        "messages":[{"role":"user","content":"hi"}]}'
 ```
 
@@ -205,6 +211,8 @@ values outlive the buttons.
 **Re-checked 15 September 2026.** `Gpt_5_5_Chat` is gone, replaced by
 `Gpt_5_6_Chat`; the rest of the table is unchanged, `totalNumberOfSections` is
 still 2, and `defaultModelSelectionId` is still `Magic`.
+
+**Re-checked 25 November 2026.** A new entry, "GPT-6.2 Sol", sends `Gpt_62_Sol_Reasoning`. Major and minor are glued together and the name is part of the value, so the pattern that held from 5.4 to 5.6 does not hold any more. I did not check what else in the menu changed that day.
 
 `tone` is **per conversation**, not per profile. A new chat resets to `Magic`
 regardless of what was selected elsewhere. It is sent with every message, though,
