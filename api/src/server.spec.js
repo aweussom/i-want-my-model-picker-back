@@ -23,7 +23,7 @@ check('@suffix from the UI', () => assert.equal(resolveTone('Chat@microsoft'), '
 check('@suffix on a named model', () => assert.equal(resolveTone('Gpt_5_6_Chat@openai'), 'Gpt_5_6_Chat'));
 check('unknown model falls back to the default', () => assert.equal(resolveTone('gpt-4o'), DEFAULT_TONE));
 check('missing model falls back to the default', () => assert.equal(resolveTone(undefined), DEFAULT_TONE));
-check('the default is the newest GPT, not Auto', () => assert.equal(DEFAULT_TONE, 'Gpt_5_6_Reasoning'));
+check('the default is the newest GPT, not Auto', () => assert.equal(DEFAULT_TONE, 'Gpt_62_Sol_Reasoning'));
 
 console.log('message extraction');
 check('plain string content', () =>

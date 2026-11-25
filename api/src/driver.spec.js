@@ -58,9 +58,9 @@ check('upload recognised', () =>
   assert.ok(isUpload('https://substrate.office.com/m365Copilot/UploadFile')));
 
 console.log('tones');
-check('six tones, and the newest GPT is what we request by default', () => {
-  assert.equal(Object.keys(TONES).length, 6);
-  assert.equal(DEFAULT_TONE, 'Gpt_5_6_Reasoning');
+check('seven tones, and the newest GPT is what we request by default', () => {
+  assert.equal(Object.keys(TONES).length, 7);
+  assert.equal(DEFAULT_TONE, 'Gpt_62_Sol_Reasoning');
   // Labels are aliases for resolveTone() now. Both the Sol menu text of Nov
   // 2026 and the older names must resolve.
   assert.ok(TONES.Gpt_5_6_Reasoning.labels.includes('GPT-5.6 Sol Think deeper'));
@@ -96,7 +96,11 @@ check('a menu with named models does match', () =>
 console.log('default tone selection');
 const { highestGptTone, BROWSER_DEFAULT_TONE } = require('./driver.js');
 check('picks the highest GPT from the shipped menu', () =>
-  assert.equal(highestGptTone(), 'Gpt_5_6_Reasoning'));
+  assert.equal(highestGptTone(), 'Gpt_62_Sol_Reasoning'));
+check('glued 62 is 6.2: beats 5.6, loses to a 7.0', () => {
+  assert.equal(highestGptTone({ Gpt_5_6_Reasoning: {}, Gpt_62_Sol_Reasoning: {} }), 'Gpt_62_Sol_Reasoning');
+  assert.equal(highestGptTone({ Gpt_62_Sol_Reasoning: {}, Gpt_7_0_Chat: {} }), 'Gpt_7_0_Chat');
+});
 check('a future 5.7 would win without an edit', () =>
   assert.equal(highestGptTone({ Gpt_5_6_Reasoning: {}, Gpt_5_7_Chat: {} }), 'Gpt_5_7_Chat'));
 check('major version beats minor', () =>
