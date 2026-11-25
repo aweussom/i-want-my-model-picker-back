@@ -1,0 +1,26 @@
+{
+  "openai/Gpt_62_Sol_Reasoning": {
+    "max_input_tokens": 30000,
+    "max_output_tokens": 16000,
+    "input_cost_per_token": 0,
+    "output_cost_per_token": 0,
+    "litellm_provider": "openai",
+    "mode": "chat"
+  },
+  "openai/Gpt_5_6_Reasoning": {
+    "max_input_tokens": 30000,
+    "max_output_tokens": 16000,
+    "input_cost_per_token": 0,
+    "output_cost_per_token": 0,
+    "litellm_provider": "openai",
+    "mode": "chat"
+  },
+  "openai/Gpt_5_6_Chat": {
+    "max_input_tokens": 30000,
+    "max_output_tokens": 16000,
+    "input_cost_per_token": 0,
+    "output_cost_per_token": 0,
+    "litellm_provider": "openai",
+    "mode": "chat"
+  }
+}
