@@ -21,8 +21,30 @@ check('menu label', () => assert.equal(resolveTone('GPT 5.6 Think deeper'), 'Gpt
 // it so a rename is still noticed rather than silently tolerated.
 check('@suffix from the UI', () => assert.equal(resolveTone('Chat@microsoft'), 'Chat'));
 check('@suffix on a named model', () => assert.equal(resolveTone('Gpt_5_6_Chat@openai'), 'Gpt_5_6_Chat'));
-check('unknown model falls back to the default', () => assert.equal(resolveTone('gpt-4o'), DEFAULT_TONE));
+check('unknown model is refused, not swapped for the default', () => assert.equal(resolveTone('gpt-4o'), null));
 check('missing model falls back to the default', () => assert.equal(resolveTone(undefined), DEFAULT_TONE));
+// Ids and gated flags as the menu-data-tone userscript read the work tenant on
+// 2026-11-25. Titles of the generic and GPT items as observed; the Claude titles
+// are made up, only their ids and gated flags were reported.
+const menu = [
+  { id: 'Magic', title: 'Auto', gated: false },
+  { id: 'Chat', title: 'Quick response', gated: false },
+  { id: 'Reasoning', title: 'Think deeper', gated: false },
+  { id: 'Claude_Sonnet', title: 'Claude Sonnet', gated: true },
+  { id: 'Claude_Opus', title: 'Claude Opus', gated: true },
+  { id: 'Gpt_6_Sol_Chat', title: 'GPT-6', gated: false },
+  { id: 'Gpt_62_Sol_Reasoning', title: 'GPT-6.2 Sol', gated: false },
+];
+check('live menu: a TONES model that left the menu is refused', () =>
+  assert.equal(resolveTone('Gpt_5_6_Chat', DEFAULT_TONE, menu), null));
+check('live menu: a menu id TONES lacks is accepted', () =>
+  assert.equal(resolveTone('gpt_6_sol_chat', DEFAULT_TONE, menu), 'Gpt_6_Sol_Chat'));
+check('live menu: the menu title is an alias, matched exactly', () =>
+  assert.equal(resolveTone('gpt-6', DEFAULT_TONE, menu), 'Gpt_6_Sol_Chat'));
+check('live menu: a TONES label still resolves when its id is offered', () =>
+  assert.equal(resolveTone('GPT 6.2', DEFAULT_TONE, menu), 'Gpt_62_Sol_Reasoning'));
+check('live menu: a mode the menu dropped is refused', () =>
+  assert.equal(resolveTone('Chat', DEFAULT_TONE, menu.filter((i) => i.id !== 'Chat')), null));
 check('the default is the newest GPT, not Auto', () => assert.equal(DEFAULT_TONE, 'Gpt_62_Sol_Reasoning'));
 
 console.log('message extraction');

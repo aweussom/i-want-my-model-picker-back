@@ -42,20 +42,48 @@ const MIME = {
 /**
  * Map an OpenAI `model` value onto a tone.
  *
- * `fallback` is the driver's default (newest GPT in TONES). An unknown model
- * name falls back to it rather than failing; the tone that actually went out
- * is logged by the driver and reported as `tone` by /health.
+ * `fallback` is the driver's default (newest GPT in TONES), used only when the
+ * request names no model. An unknown name returns null and the handler answers
+ * 400: falling back silently once gave aider GPT-5.6 answers while it reported
+ * Gpt_62_Sol_Reasoning, because the server predated that tone [OBSERVED 2026-11-25].
+ *
+ * `menu` is the tenant's live model menu (driver.menu: [{id, title, gated, ...}]),
+ * or null when the userscript could not read it. When it is known it alone
+ * decides: a TONES entry that left the menu is refused, a menu id TONES has never
+ * heard of is accepted, and the menu title works as an alias. Whether a gated
+ * item may be sent is the handler's call, not this function's.
  */
-function resolveTone(requested, fallback = DEFAULT_TONE) {
+function resolveTone(requested, fallback = DEFAULT_TONE, menu = null) {
   if (!requested) return fallback;
-  if (TONES[requested]) return requested;
   // Accept the menu label too, and ignore any "@suffix" the UI appends.
   const bare = String(requested).split('@')[0].trim().toLowerCase();
-  for (const [tone, meta] of Object.entries(TONES)) {
-    if (bare === tone.toLowerCase()) return tone;
-    if ((meta.labels || []).some((l) => bare === l.toLowerCase())) return tone;
+
+  if (menu) {
+    for (const item of menu) {
+      if (bare === item.id.toLowerCase()) return item.id;
+      if (item.title && bare === item.title.toLowerCase()) return item.id;
+    }
   }
-  return fallback;
+
+  let tone = null;
+  for (const [id, meta] of Object.entries(TONES)) {
+    if (bare === id.toLowerCase()) { tone = id; break; }
+    if ((meta.labels || []).some((l) => bare === l.toLowerCase())) { tone = id; break; }
+  }
+  if (!tone) return null;
+
+  if (menu && !menu.some((item) => item.id === tone)) return null;
+  return tone;
+}
+
+/**
+ * The model names a 400 should offer: the menu when known, else TONES.
+ * `menuFrom` is driver.menuFrom, "page <iso>" or "cache <iso>"; the iso is when
+ * the menu was read, so a cache value can be days old. Passed on as-is.
+ */
+function knownModels(menu, menuFrom = null) {
+  if (menu) return { names: menu.map((item) => item.id), from: `the menu (${menuFrom || 'source not reported'})` };
+  return { names: Object.keys(TONES), from: 'TONES in driver.js (menu not read)' };
 }
 
 function lastUserMessage(body) {
@@ -209,6 +237,7 @@ function createServer(driver) {
         tone: driver ? driver.currentTone : null,
         defaultTone: driver ? driver.defaultTone : null,
         availableTones: driver ? driver.availableTones : null,
+        menuFrom: driver ? (driver.menuFrom || null) : null,
         browser: driver ? driver.usingChannel : null,
         headless: driver ? driver.headless : null,
         conversationId: driver ? driver.currentConversationId() : null,
@@ -222,21 +251,25 @@ function createServer(driver) {
     if (route === '/v1/models') {
       // Default first: the UI populates its dropdown in this order and the
       // browser selects option zero, so ordering *is* the default selection.
-      // availableTones is always null since the picker is no longer clicked, so
-      // this lists every known tone, default first.
+      // Same list the 400 offers, so every id listed here is one resolveTone()
+      // matches: the live menu when the userscript read it, every TONES entry when
+      // it did not. Gated items are listed, flagged, and refused on use.
       const preferred = (driver && driver.defaultTone) || DEFAULT_TONE;
-      const offered = (driver && driver.availableTones) || Object.keys(TONES);
-      const ids = offered
-        .filter((id) => TONES[id])
+      const menu = (driver && driver.menu) || null;
+      const ids = knownModels(menu).names
         .sort((a, b) => (a === preferred ? -1 : b === preferred ? 1 : 0));
       return json(res, 200, {
         object: 'list',
-        data: ids.map((id) => ({
-          id,
-          object: 'model',
-          owned_by: TONES[id].ownedBy,
-          description: TONES[id].title,
-        })),
+        data: ids.map((id) => {
+          const menuItem = menu ? menu.find((item) => item.id === id) : null;
+          return {
+            id,
+            object: 'model',
+            owned_by: TONES[id] ? TONES[id].ownedBy : 'unknown (live menu id, not in TONES)',
+            description: menuItem ? menuItem.title : TONES[id].title,
+            gated: Boolean(menuItem && menuItem.gated),
+          };
+        }),
       });
     }
 
@@ -302,7 +335,31 @@ function createServer(driver) {
       console.log(`[server] ${fullHistory ? 'full-history' : 'last-message'} prompt, ${prompt.length} characters, ${(body.messages || []).length} messages in the request`);
       const promptOptions = { fresh: fullHistory };
 
-      const tone = resolveTone(body.model, (driver && driver.defaultTone) || DEFAULT_TONE);
+      const menu = (driver && driver.menu) || null;
+      const tone = resolveTone(body.model, (driver && driver.defaultTone) || DEFAULT_TONE, menu);
+      if (!tone) {
+        const { names, from } = knownModels(menu, driver && driver.menuFrom);
+        const known = names.join(', ');
+        console.log(`[server] refusing: model ${JSON.stringify(body.model)} is not offered (known from ${from}: ${known})`);
+        return json(res, 400, { error: {
+          message: `unknown model ${JSON.stringify(body.model)}. Known from ${from}: ${known}. Omit "model" for the default.`,
+          type: 'invalid_request_error',
+          code: 'model_not_found',
+        } });
+      }
+      // A gated item carries a tenant policy check the userscript cannot evaluate.
+      // On the work tenant that policy disables Claude_* [OBSERVED 2026-11-25, by
+      // the menu-data-tone session]; sending it anyway would fail late inside
+      // Copilot, or come back from some other model.
+      const menuItem = menu ? menu.find((item) => item.id === tone) : null;
+      if (menuItem && menuItem.gated) {
+        console.log(`[server] refusing: model ${tone} is gated by tenant policy in the menu`);
+        return json(res, 400, { error: {
+          message: `model ${tone} is gated by tenant policy; the userscript cannot confirm it is enabled for this account, so it is not sent.`,
+          type: 'invalid_request_error',
+          code: 'model_gated',
+        } });
+      }
       const { uris, skippedRemote } = extractImages(body);
       const notice = skippedRemote
         ? `[note: skipped ${skippedRemote} remote image URL(s); attach as a base64 data: URI instead]\n`
