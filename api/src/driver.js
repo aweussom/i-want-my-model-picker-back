@@ -56,6 +56,8 @@ const COMPOSER_SELECTORS = [
 // Gpt_5_6_Reasoning and Gpt_5_6_Chat were read off the wire on 2026-11-04 with
 // the userscript set to Off. Gpt_5_5_Chat had left the menu by then and is
 // untested since; kept because values have outlived their buttons before.
+// Gpt_62_Sol_Reasoning was read off the wire on 2026-11-25, menu label
+// "GPT-6.2 Sol". No Chat counterpart seen yet.
 const TONES = {
   Magic: {
     labels: ['Auto', 'Automatisk'],
@@ -68,6 +70,10 @@ const TONES = {
   Reasoning: {
     labels: ['Think deeper', 'Tenk dypere'],
     title: 'Think deeper', ownedBy: 'microsoft',
+  },
+  Gpt_62_Sol_Reasoning: {
+    labels: ['GPT-6.2 Sol', 'GPT 6.2 Sol', 'GPT 6.2'],
+    title: 'GPT-6.2 Sol', ownedBy: 'openai',
   },
   Gpt_5_6_Reasoning: {
     labels: ['GPT-5.6 Sol Think deeper', 'GPT 5.6 Sol Think', 'GPT 5.6 Think deeper',
@@ -109,9 +115,17 @@ const CHALLENGE_FRAME_MARKER = 'challenges.cloudflare.com';
  * Reasoning wins over Chat at the same version: "Think deeper" is the point.
  */
 function highestGptTone(tones = TONES) {
+  // Two shapes on the wire: Gpt_5_6_Reasoning, and Gpt_62_Sol_Reasoning where
+  // major and minor come glued. "62" is read as 6.2 because the menu says
+  // "GPT-6.2 Sol" [INFERRED]; read as 62 it would outrank any real 7.x.
   const parse = (id) => {
-    const m = /^Gpt_(\d+)_(\d+)_(\w+)$/i.exec(id);
-    return m && { major: +m[1], minor: +m[2], reasoning: /reasoning/i.test(m[3]) };
+    const m = /^Gpt_(\d+)(?:_(\d+))?(?:_[A-Za-z]+)?_(\w+)$/i.exec(id);
+    if (!m) return null;
+    const reasoning = /reasoning/i.test(m[3]);
+    if (m[2] !== undefined) return { major: +m[1], minor: +m[2], reasoning };
+    const digits = m[1];
+    const minor = digits.length > 1 ? +digits.slice(1) : 0;
+    return { major: +digits.slice(0, 1), minor, reasoning };
   };
   let best = null;
   let bestId = null;

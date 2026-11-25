@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         i want my model picker back (overlay)
 // @namespace    https://github.com/aweussom/i-want-my-model-picker-back
-// @version      20261104-151151
+// @version      20261125-153828
 // @description  Forces the best GPT reasoning model on every M365 Copilot chat message, whatever Microsoft's picker says. No interaction needed.
 // @match        https://m365.cloud.microsoft/*
 // @match        https://copilot.cloud.microsoft/*
@@ -21,8 +21,8 @@
 // script wraps WebSocket.prototype.send, finds that record, swaps tone, and lets
 // everything else through byte-for-byte.
 //
-// Default mode is "best": the highest Gpt_<major>_<minor>_Reasoning known. No
-// dropdown; a small badge shows what is being forced. If Microsoft's own picker
+// Default mode is "best": the highest Gpt_<major>_<minor>_Reasoning, or the
+// glued Gpt_<major><minor>_<Name>_Reasoning, known. No dropdown; a small badge shows what is being forced. If Microsoft's own picker
 // ever sends a higher Gpt_*_Reasoning (you picked a new model in their menu),
 // that value is adopted as the new best and remembered.
 //
@@ -40,7 +40,7 @@
   "use strict";
 
   // Keep in step with @version above; both are stamped by the same edit.
-  const VERSION = "20261104-151151";
+  const VERSION = "20261125-153828";
   const TAG = "[model-picker-overlay]";
   // New key on purpose: the earlier dropdown version stored explicit picks
   // under "mpo.tone", and an old pick must not pin a browser below "best".
@@ -51,20 +51,33 @@
   const BEST = "best"; // resolve to bestTone() at send time
 
   // Reasoning tones seen on the wire. Gpt_5_6_Reasoning is shown as
-  // "GPT-5.6 Sol Think deeper" [OBSERVED 2026-11-04].
-  const KNOWN_REASONING_TONES = ["Gpt_5_6_Reasoning"];
+  // "GPT-5.6 Sol Think deeper" [OBSERVED 2026-11-04]. Gpt_62_Sol_Reasoning is
+  // shown as "GPT-6.2 Sol" [OBSERVED 2026-11-25].
+  const KNOWN_REASONING_TONES = ["Gpt_5_6_Reasoning", "Gpt_62_Sol_Reasoning"];
   // Used only if no Gpt_*_Reasoning is known at all.
   const FALLBACK_TONE = "Reasoning";
 
   // --- best-tone logic -------------------------------------------------------
 
-  // "Gpt_5_6_Reasoning" -> 5006; anything else -> null. Major dominates minor.
+  // "Gpt_5_6_Reasoning" -> 5006, "Gpt_62_Sol_Reasoning" -> 6002; anything
+  // else -> null. Major dominates minor.
+  //
+  // Two shapes are on the wire. 5.6 has an underscore between major and minor.
+  // 6.2 came glued ("62") with a name word ("Sol") before "_Reasoning". Reading
+  // "62" as 6.2 is inferred from the menu label "GPT-6.2 Sol"; read as 62 it
+  // would outrank any real 7.x forever.
   function reasoningRank(tone) {
-    const m = /^Gpt_(\d+)_(\d+)_Reasoning$/.exec(String(tone));
+    const m = /^Gpt_(\d+)(?:_(\d+))?(?:_[A-Za-z]+)?_Reasoning$/.exec(String(tone));
     if (!m) {
       return null;
     }
-    return Number(m[1]) * 1000 + Number(m[2]);
+    if (m[2] !== undefined) {
+      return Number(m[1]) * 1000 + Number(m[2]);
+    }
+    const digits = m[1];
+    const major = Number(digits.slice(0, 1));
+    const minor = digits.length > 1 ? Number(digits.slice(1)) : 0;
+    return major * 1000 + minor;
   }
 
   let learnedBest = null;
