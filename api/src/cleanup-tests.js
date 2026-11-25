@@ -111,7 +111,8 @@ async function cleanupApiChats(dryRun) {
 
   const driver = await new CopilotDriver({}).start();
   const listed = await driver.listConversations({ limit: 200 });
-  const nameById = new Map(listed.map((c) => [c.id, c.name]));
+  // Sidebar ids can carry a query ("<id>?redirfrom=mcmToCcm"); the ledger has bare ids.
+  const nameById = new Map(listed.map((c) => [String(c.id).split('?')[0], c.name]));
   for (const id of ids) {
     console.log(`  ${id}  ${nameById.has(id) ? nameById.get(id) : '(not in the sidebar list)'}`);
   }
