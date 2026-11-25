@@ -25,9 +25,9 @@ was measured.
 
 [`userscript/model-picker.user.js`](userscript/model-picker.user.js). Install with Tampermonkey or Violentmonkey: create a new script, paste the file in, save, reload Copilot. It matches `m365.cloud.microsoft` and `copilot.cloud.microsoft`.
 
-Nothing to set. Every message goes out on the best reasoning model the script knows - today `Gpt_62_Sol_Reasoning` ("GPT-6.2 Sol" in Microsoft's menu). A small badge in the corner says what it is forcing. It is click-through, so it never covers anything.
+Nothing to set. Every message goes out on the bottom model in Microsoft's GPT submenu - today `Gpt_62_Sol_Reasoning` ("GPT-6.2 Sol"). A small badge in the corner says what it forces. It is click-through, so it never covers anything.
 
-If Microsoft ships something newer and you pick it once in their menu, the script sees a higher reasoning tone go out, adopts it as the new best, and remembers it. That only works if the new value has a shape the script can rank. 6.2 did not. It came as `Gpt_62_Sol_Reasoning` where I expected `Gpt_6_2_Reasoning`, the old pattern ignored it, and the script needed an edit after all. It now reads both shapes, and takes the glued `62` as 6.2 because that is what the menu says.
+Why the bottom one: that has been the expensive model from 5.6 through 6, 6.1 and 6.2. The tone names changed shape three times in the same period (`Gpt_5_6_Reasoning`, `Gpt_6_Sol_Chat`, `Gpt_62_Sol_Reasoning`), and version 20261125-153828 needed an edit for 6.2 because it ranked by name. So the script no longer reads anything into the names. It reads Microsoft's menu out of the page instead. `modelSelectorMetadata` is still rendered into the HTML by the server, but the scripts that carry it delete themselves after running, so it is not in the live page. The script fetches its own page once per load, takes the chat's copy of the menu, and caches it. If it cannot read the menu it rewrites nothing, logs an error, and the badge goes red.
 
 How it works: it wraps `WebSocket.prototype.send`, finds the chat invocation on the Chathub socket, and replaces one field, `arguments[0].tone`. Everything else goes out byte for byte. Microsoft's menu keeps showing its own label, because the script never touches it.
 
@@ -44,6 +44,8 @@ On 25 November 2026, same tenant, script version 20261125-153828:
 
 - With the override off, picking "GPT-6.2 Sol" sends `Gpt_62_Sol_Reasoning`.
 - With it on and the menu on Auto, the console logs `Magic -> Gpt_62_Sol_Reasoning`, and the thread reopens with the menu showing "GPT-6.2 Sol".
+
+Later the same day, version 20261125-225004, reading the menu: a new chat on Auto goes out as `Gpt_62_Sol_Reasoning`, and the thread reopens with the menu showing "GPT-6.2 Sol". The menu it read had two Claude entries too, Sonnet 5.5 and Opus 5.5, behind a tenant policy that is off on this tenant.
 
 The console says what it is doing, prefixed `[model-picker-overlay]`. If there is no `loaded` line, the script was not injected into the page. If it loads but never logs a send, Copilot has changed its transport and the script is doing nothing.
 
@@ -67,7 +69,7 @@ curl http://127.0.0.1:8791/v1/chat/completions \
        "messages":[{"role":"user","content":"hi"}]}'
 ```
 
-Leave out `model` and you get the newest GPT reasoning tone. `GET /v1/models` lists the known values. Images work via the standard `image_url` part with a base64 `data:` URI. Progress messages come back as `reasoning_content`, so a client can fold "Getting things ready…" into a thinking block.
+Leave out `model` and you get the bottom entry of the GPT submenu, read the same way as the userscript does. `GET /v1/models` lists the known values. Images work via the standard `image_url` part with a base64 `data:` URI. Progress messages come back as `reasoning_content`, so a client can fold "Getting things ready…" into a thinking block.
 
 There is a minimal chat UI at `/` for poking at it. The rest, including `COPILOT_PROFILE` for keeping work and personal accounts apart, is in [`api/README.md`](api/README.md).
 

@@ -8,7 +8,7 @@
   "scripts": {
     "serve": "node src/server.js",
     "signin": "node src/signin.js",
-    "test": "node --test src/driver.spec.js src/server.spec.js"
+    "test": "node --test src/driver.spec.js src/server.spec.js src/userscript.spec.js"
   },
   "dependencies": {
     "playwright": "^1.62.1"
