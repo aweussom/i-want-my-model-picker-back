@@ -805,7 +805,7 @@ class CopilotDriver {
     }
   }
 
-  async *prompt(text, { tone = null, images = [], timeoutMs = 300_000 } = {}) {
+  async *prompt(text, { tone = null, images = [], timeoutMs = 300_000, fresh = false } = {}) {
     // Which tone goes into the frame.
     //
     // An explicit model is sent as asked, in the current thread. Changing tone no
@@ -836,6 +836,19 @@ class CopilotDriver {
     const emit = (e) => pending.push(e);
 
     try {
+      // fresh: the caller sends the whole history in `text` (an agent such as
+      // aider resends everything every turn), so the turn must not land on top
+      // of a thread that already holds the previous turns.
+      if (fresh) {
+        console.log(`[driver] fresh turn requested: opening ${this.url} for a new, empty chat`);
+        await this.page.goto(this.url, { waitUntil: 'domcontentloaded' });
+        const freshComposer = await this._waitComposer(120);
+        if (!freshComposer) throw new Error(await this._composerLostReason());
+        await this.page.waitForTimeout(1500);
+        this._conversationPinned = false;
+        if (!tone) toneToSend = this.defaultTone;
+      }
+
       this._events.clear();
 
       // Set the override every turn, not only on change: a full navigation
@@ -863,7 +876,12 @@ class CopilotDriver {
         await this.page.keyboard.press('Control+A');
         await this.page.keyboard.press('Delete');
       }
-      await composer.type(text, { delay: 8 });
+      // insertText, not type(): type() presses Enter for every "\n", which would
+      // send a multi-line prompt at its first line break, and at 8 ms per key a
+      // 128k prompt took 17 minutes. insertText is one input event; probe-limits.js
+      // measured 130k characters with every newline kept in about 1.5 s (2026-11-25).
+      console.log(`[driver] inserting ${text.length} characters into the composer, then pressing Enter`);
+      await this.page.keyboard.insertText(text);
       await this.page.keyboard.press('Enter');
 
       // Confirm the frame went out through the userscript with our tone. Without

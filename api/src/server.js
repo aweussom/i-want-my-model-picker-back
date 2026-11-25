@@ -72,6 +72,45 @@ function lastUserMessage(body) {
   return '';
 }
 
+// The composer greys out Send above 128,000 characters [OBSERVED 2026-11-25,
+// probe-limits.js, work tenant]. A 119,980-character prompt came back with
+// all three needles (start, middle, end), so the model reads all of it.
+const COMPOSER_MAX_CHARS = 128000;
+
+function messageText(m) {
+  if (typeof m.content === 'string') return m.content;
+  if (Array.isArray(m.content)) {
+    return m.content.filter((p) => p && p.type === 'text').map((p) => p.text || '')
+      .filter(Boolean).join('\n');
+  }
+  return '';
+}
+
+/**
+ * The whole conversation as one prompt, for COPILOT_HISTORY=full.
+ *
+ * Copilot keeps history server-side and only takes one message at a time; an
+ * agent like aider resends system prompt, files and history on every request
+ * and expects them all to count. So each request becomes a new chat holding a
+ * transcript, and the model is told to write only the next assistant turn.
+ */
+function flattenMessages(body) {
+  const messages = body.messages || [];
+  const parts = [
+    'You are serving as the model behind an API. The transcript below is the whole ' +
+    'conversation so far. Follow the SYSTEM instructions exactly and write only the ' +
+    'next ASSISTANT message: no preamble, no citations, no web search, no commentary ' +
+    'about this format.',
+  ];
+  for (const m of messages) {
+    const text = messageText(m);
+    if (!text) continue;
+    parts.push(`===== ${String(m.role || 'user').toUpperCase()} =====\n${text}`);
+  }
+  parts.push('===== ASSISTANT =====');
+  return parts.join('\n\n');
+}
+
 function extractImages(body) {
   const messages = body.messages || [];
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -241,8 +280,18 @@ function createServer(driver) {
       try { body = await readBody(req); }
       catch { return json(res, 400, { error: { message: 'bad json' } }); }
 
-      const prompt = lastUserMessage(body);
-      if (!prompt) return json(res, 400, { error: { message: 'no user message' } });
+      const fullHistory = process.env.COPILOT_HISTORY === 'full';
+      const prompt = fullHistory ? flattenMessages(body) : lastUserMessage(body);
+      if (!lastUserMessage(body)) return json(res, 400, { error: { message: 'no user message' } });
+      if (prompt.length > COMPOSER_MAX_CHARS) {
+        console.log(`[server] refusing: prompt is ${prompt.length} characters, composer takes ${COMPOSER_MAX_CHARS}`);
+        return json(res, 400, { error: {
+          message: `prompt is ${prompt.length} characters; the Copilot composer takes at most ${COMPOSER_MAX_CHARS}. Drop files from the chat.`,
+          type: 'context_length_exceeded',
+        } });
+      }
+      console.log(`[server] ${fullHistory ? 'full-history' : 'last-message'} prompt, ${prompt.length} characters, ${(body.messages || []).length} messages in the request`);
+      const promptOptions = { fresh: fullHistory };
 
       const tone = resolveTone(body.model, (driver && driver.defaultTone) || DEFAULT_TONE);
       const { uris, skippedRemote } = extractImages(body);
@@ -259,7 +308,7 @@ function createServer(driver) {
         });
         if (notice) res.write(sseChunk(notice, tone, { reasoning: true }));
         try {
-          for await (const ev of driver.prompt(prompt, { tone, images: uris })) {
+          for await (const ev of driver.prompt(prompt, { tone, images: uris, ...promptOptions })) {
             res.write(sseChunk(ev.value, tone, { reasoning: ev.kind === 'reasoning' }));
           }
         } catch (e) {
@@ -271,7 +320,7 @@ function createServer(driver) {
 
       try {
         let text = '';
-        for await (const ev of driver.prompt(prompt, { tone, images: uris })) {
+        for await (const ev of driver.prompt(prompt, { tone, images: uris, ...promptOptions })) {
           if (ev.kind === 'text') text += ev.value;
         }
         return json(res, 200, {
@@ -290,7 +339,7 @@ function createServer(driver) {
   });
 }
 
-module.exports = { createServer, resolveTone, lastUserMessage, extractImages, sseChunk };
+module.exports = { createServer, resolveTone, lastUserMessage, flattenMessages, extractImages, sseChunk };
 
 // Run standalone: node src/server.js
 if (require.main === module) {

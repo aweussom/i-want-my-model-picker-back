@@ -45,6 +45,25 @@ read that before proposing anything structural.
   browser keeps the same Copilot thread. Either reload on an empty history or
   expose an explicit endpoint.
 
+- **Attachments and OneDrive files as context, for a real coding harness.** Not
+  needed for aider: the composer takes 128,000 characters and a 119,980-character
+  prompt came back with all three needles [OBSERVED 2026-11-25, probe-limits.js
+  and one real send]. A harness like Claude Code or OpenCode needs more: its
+  system prompt and tool definitions alone can exceed 128k characters (Claude
+  Code's auto-mode classifier prompt is ~47,800 tokens). The split to test:
+  static text (system prompt, tool docs, CLAUDE.md, reference files) as an
+  attachment or OneDrive file; tool-call protocol, history, tool results and
+  edited files typed. Two tests decide it:
+  1. Needles at start, middle and end of a ~300k-character attachment, and of
+     the same file attached from OneDrive. Does the model name all three, or
+     does Copilot hand it retrieved fragments? Fragments kill the idea for
+     instructions, silently.
+  2. OneDrive only: change the last needle, ask again at once, time how long
+     until the answer changes. A stale copy means edits against old content.
+  Keep the tool-call format in typed text whatever the result; that is what the
+  bridge parses. Prefer OpenCode as the target: its prompts are config
+  [INFERRED, not checked for the current version].
+
 - Non-image file uploads. `cwc_fileupload_odb` and `add_filestore_filetype` are
   in `optionsSets`, and `UploadFile` takes a `scenario` field that was
   `UploadImage` for pictures. Something else presumably goes there.
